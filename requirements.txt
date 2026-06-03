@@ -1,0 +1,52 @@
+# Core AI/LLM
+ollama==0.6.2
+langchain==0.1.14
+langchain-community==0.0.30
+numpy>=1.24.0
+
+# Voice Processing
+openai-whisper>=20230314
+pyttsx3==2.99
+sounddevice==0.5.5
+soundfile==0.12.1
+# pyaudio is optional and may be replaced with system audio tools or sounddevice if needed
+
+# Memory & Embeddings
+chromadb==0.4.20
+sentence-transformers==2.2.2
+
+# Automation
+pyautogui==0.9.54
+playwright==1.40.0
+pynput==1.7.6
+
+# Vision
+opencv-python==4.8.1.78
+pytesseract==0.3.10
+easyocr==1.7.0
+
+# Backend
+fastapi==0.109.0
+uvicorn==0.27.0
+python-multipart==0.0.6
+
+# Frontend
+flask==3.0.0
+
+# Utilities
+requests==2.31.0
+python-dotenv==1.0.0
+pydantic>=2.9.0,<3
+pydantic-settings>=2.1.0,<3
+
+
+# Database
+sqlalchemy==2.0.23
+
+# Logging
+python-logging-loki==0.3.1
+
+# Development
+pytest==7.4.3
+black==23.12.1
+flake8==6.1.0

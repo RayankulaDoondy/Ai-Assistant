@@ -1,0 +1,19 @@
+# Minimal Jarvis requirements - core packages only
+ollama>=0.6.0
+langchain>=0.1.0
+pydantic>=2.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
+# Voice
+pyttsx3>=2.90
+sounddevice>=0.4.5
+soundfile>=0.12.0
+openai-whisper>=20230314
+
+# Memory
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+
+# Utilities
+requests>=2.31.0

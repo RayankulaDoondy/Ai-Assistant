@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Hunt</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css?v=memfix3">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img id="brandLogo" class="brand-logo" src="/static/doondy-logo.png" alt="Hunt">
+        <div id="brandFallback" class="brand-mark" aria-hidden="true">H</div>
+        <div class="brand-text">
+          <strong>Hunt</strong>
+          <span>Doonzi</span>
+        </div>
+      </div>
+
+      <div class="pills" aria-label="System status">
+        <span class="pill" id="apiPill"><span class="dot"></span><span>API</span><strong id="apiStatus">…</strong></span>
+        <span class="pill" id="llmPill"><span class="dot"></span><span>LLM</span><strong id="llmStatus">…</strong></span>
+        <span class="pill" id="memPill"><span class="dot"></span><span>Memory</span><strong id="memoryStatus">…</strong></span>
+      </div>
+
+      <div class="header-actions">
+        <button id="projectPill" class="project-pill" type="button" aria-label="Active project" aria-expanded="false">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 7h18M3 7l2-3h6l2 3M3 7v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7"></path>
+          </svg>
+          <span class="project-pill-label" id="projectPillLabel">No project</span>
+          <span class="project-pill-chevron" aria-hidden="true">▾</span>
+        </button>
+        <div id="projectPopover" class="popover project-popover" role="menu" hidden>
+          <div class="popover-section">
+            <div class="popover-section-title-static">Switch project</div>
+            <ul id="projectPickerList" class="project-picker-list"></ul>
+            <button id="clearProjectButton" type="button" class="ghost-button popover-action">No project</button>
+            <button id="openProjectsPanelButton" type="button" class="ghost-button popover-action">Manage projects…</button>
+          </div>
+        </div>
+        <label class="model-picker" aria-label="Active model">
+          <span aria-hidden="true">Model</span>
+          <select id="modelPicker">
+            <option value="">Loading…</option>
+          </select>
+          <strong id="modelStatus" hidden>-</strong>
+        </label>
+        <button id="muteButton" class="icon-button" type="button" aria-label="Mute Hunt" aria-pressed="false" title="Mute / unmute voice (M)">
+          <svg id="muteIconOn" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+          </svg>
+          <svg id="muteIconOff" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden>
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            <line x1="23" y1="9" x2="17" y2="15"></line>
+            <line x1="17" y1="9" x2="23" y2="15"></line>
+          </svg>
+        </button>
+        <button id="sessionsButton" class="icon-button" type="button" aria-label="Past chats" aria-expanded="false">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 5h18M3 12h18M3 19h18"></path>
+            <circle cx="6" cy="5" r="0.5" fill="currentColor"></circle>
+            <circle cx="6" cy="12" r="0.5" fill="currentColor"></circle>
+            <circle cx="6" cy="19" r="0.5" fill="currentColor"></circle>
+          </svg>
+          <span id="mongoDot" class="topbar-dot" hidden></span>
+        </button>
+        <button id="memoryButton" class="icon-button" type="button" aria-label="Memory" aria-expanded="false">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 3a3 3 0 0 0-3 3v1a3 3 0 0 0-3 3v4a3 3 0 0 0 3 3v1a3 3 0 0 0 3 3"></path>
+            <path d="M15 3a3 3 0 0 1 3 3v1a3 3 0 0 1 3 3v4a3 3 0 0 1-3 3v1a3 3 0 0 1-3 3"></path>
+            <path d="M9 8h6M9 12h6M9 16h6"></path>
+          </svg>
+        </button>
+        <button id="settingsButton" class="icon-button" type="button" aria-label="Settings" aria-expanded="false">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </button>
+      </div>
+
+      <div id="settingsPopover" class="popover" role="menu" hidden>
+        <section class="popover-section" data-section="appearance">
+          <button type="button" class="popover-section-title" aria-expanded="true"><span>Appearance</span></button>
+          <div class="popover-section-body">
+            <div class="segmented" role="radiogroup" aria-label="Theme" id="themeGroup">
+              <button type="button" role="radio" data-theme="light">Light</button>
+              <button type="button" role="radio" data-theme="dark">Dark</button>
+              <button type="button" role="radio" data-theme="system" aria-checked="true" class="active">System</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="popover-section" data-section="reply">
+          <button type="button" class="popover-section-title" aria-expanded="true"><span>Reply style</span></button>
+          <div class="popover-section-body">
+            <div class="segmented" role="radiogroup" aria-label="Response length" id="replyLengthGroup">
+              <button type="button" role="radio" data-length="short">Short</button>
+              <button type="button" role="radio" data-length="normal" aria-checked="true" class="active">Normal</button>
+              <button type="button" role="radio" data-length="detailed">Detailed</button>
+            </div>
+            <label class="slider-row">
+              <span>Creativity</span>
+              <input id="creativitySlider" type="range" min="0" max="100" value="60">
+              <strong id="creativityValue">0.60</strong>
+            </label>
+          </div>
+        </section>
+
+        <section class="popover-section" data-section="voice">
+          <button type="button" class="popover-section-title" aria-expanded="true"><span>Voice</span></button>
+          <div class="popover-section-body">
+            <label class="switch-row">
+              <span>Speak replies</span>
+              <input id="speakToggle" type="checkbox" checked>
+            </label>
+            <label class="select-row">
+              <span>TTS voice</span>
+              <select id="ttsVoiceSelect"><option value="">Default</option></select>
+            </label>
+            <label class="slider-row">
+              <span>Speech rate</span>
+              <input id="ttsRateSlider" type="range" min="60" max="160" value="100">
+              <strong id="ttsRateValue">1.00x</strong>
+            </label>
+          </div>
+        </section>
+
+        <section class="popover-section" data-section="routing">
+          <button type="button" class="popover-section-title" aria-expanded="true"><span>Model routing</span></button>
+          <div class="popover-section-body">
+            <p class="popover-hint">Different intents use different models. Missing models fall back to <em>fast</em>.</p>
+            <label class="select-row">
+              <span>Brain</span>
+              <select id="roleBrainSelect" data-role="brain"><option value="">…</option></select>
+            </label>
+            <label class="select-row">
+              <span>Coder</span>
+              <select id="roleCoderSelect" data-role="coder"><option value="">…</option></select>
+            </label>
+            <label class="select-row">
+              <span>Fast</span>
+              <select id="roleFastSelect" data-role="fast"><option value="">…</option></select>
+            </label>
+            <label class="select-row">
+              <span>Vision</span>
+              <select id="roleVisionSelect" data-role="vision"><option value="">…</option></select>
+            </label>
+          </div>
+        </section>
+
+        <section class="popover-section" data-section="microphone">
+          <button type="button" class="popover-section-title" aria-expanded="true"><span>Microphone</span></button>
+          <div class="popover-section-body">
+            <label class="select-row">
+              <span>Input device</span>
+              <select id="micDeviceSelect"><option value="">System default</option></select>
+            </label>
+            <button id="micPermissionButton" type="button" class="ghost-button popover-action" hidden>
+              Enable device names (one-time prompt)
+            </button>
+          </div>
+        </section>
+
+        <section class="popover-section" data-section="context">
+          <button type="button" class="popover-section-title" aria-expanded="true"><span>Context</span></button>
+          <div class="popover-section-body">
+            <label class="switch-row">
+              <span>Use memory</span>
+              <input id="memoryToggle" type="checkbox">
+            </label>
+            <label class="switch-row">
+              <span>Live data search</span>
+              <input id="liveSearchToggle" type="checkbox">
+            </label>
+            <label class="switch-row">
+              <span>Show intent label</span>
+              <input id="showIntentToggle" type="checkbox" checked>
+            </label>
+          </div>
+        </section>
+
+        <section class="popover-section" data-section="memory">
+          <button type="button" class="popover-section-title" aria-expanded="true"><span>Memory</span></button>
+          <div class="popover-section-body">
+            <button id="openMemoryPanelButton" type="button" class="ghost-button popover-action">Open memory panel</button>
+            <button id="wipeProfileFactsButton" type="button" class="danger-button popover-action">Wipe profile facts</button>
+          </div>
+        </section>
+
+        <section class="popover-section" data-section="actions">
+          <button type="button" class="popover-section-title" aria-expanded="true">
+            <span>Actions</span>
+            <strong id="actionPoliciesBadge" class="section-badge" hidden>0</strong>
+          </button>
+          <div class="popover-section-body">
+            <p class="popover-hint">Hunt proposes actions with Allow / Deny chips. <em>Always allow</em> creates an auto-approval rule below.</p>
+            <div id="actionPoliciesList" class="action-policies"></div>
+            <div class="action-history-head">
+              <span class="popover-section-title-mini">Recent (last 10)</span>
+              <button id="actionHistoryRefresh" type="button" class="ghost-button ghost-button--tiny">Refresh</button>
+            </div>
+            <ul id="actionHistoryList" class="action-history" aria-live="polite">
+              <li class="memory-empty">No actions yet. Try "open notepad".</li>
+            </ul>
+            <button id="clearActionHistoryButton" type="button" class="ghost-button popover-action">Clear history</button>
+          </div>
+        </section>
+
+        <button id="refreshButton" type="button" class="ghost-button popover-action">Refresh status</button>
+      </div>
+
+      <aside id="sessionsPanel" class="sessions-panel" aria-label="Past chats" hidden>
+        <header class="sessions-panel-header">
+          <h2>Chats</h2>
+          <div class="sessions-panel-actions">
+            <button id="newSessionButton" type="button" class="ghost-button" title="Start a fresh chat">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              <span>New</span>
+            </button>
+            <button id="closeSessionsPanelButton" type="button" class="icon-button" aria-label="Close chats panel">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+        </header>
+        <p id="sessionsStatus" class="sessions-status">Loading…</p>
+        <ul id="sessionsList" class="sessions-list" aria-live="polite">
+          <li class="memory-empty">No chats yet.</li>
+        </ul>
+      </aside>
+      <div id="sessionsPanelScrim" class="sessions-panel-scrim" hidden></div>
+
+      <aside id="memoryPanel" class="memory-panel" aria-label="Memory inspector" hidden>
+        <header class="memory-panel-header">
+          <h2>Memory</h2>
+          <div class="memory-panel-actions">
+            <button id="exportTranscriptButton" type="button" class="ghost-button" title="Download transcript as Markdown">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              <span>Export</span>
+            </button>
+            <button id="closeMemoryPanelButton" type="button" class="icon-button" aria-label="Close memory panel"
+              onclick="(function(){var p=document.getElementById('memoryPanel');var s=document.getElementById('memoryPanelScrim');if(p){p.hidden=true;}if(s){s.hidden=true;}var b=document.getElementById('memoryButton');if(b){b.setAttribute('aria-expanded','false');}document.body.classList.remove('memory-open');})()">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" pointer-events="none">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        <section class="memory-section" id="projectsSection">
+          <div class="memory-section-head">
+            <h3>Projects</h3>
+            <button id="newProjectButton" type="button" class="ghost-button ghost-button--tiny" title="Create new project">+ New</button>
+          </div>
+          <p class="popover-hint">Things you're working on. Active project's stack, tasks, and notes get injected into every reply.</p>
+          <ul id="projectList" class="project-list" aria-live="polite">
+            <li class="memory-empty">No projects yet. Click + New.</li>
+          </ul>
+          <!-- Detail view (revealed when a project is clicked). -->
+          <div id="projectDetail" class="project-detail" hidden>
+            <button id="projectDetailBack" type="button" class="ghost-button ghost-button--tiny">← Back to list</button>
+            <input id="projectDetailName" type="text" class="project-detail-name" placeholder="Project name" autocomplete="off">
+            <div class="project-detail-row">
+              <label class="project-detail-field">
+                <span>Stack</span>
+                <input id="projectDetailStack" type="text" placeholder="Flask, MongoDB, React" autocomplete="off">
+              </label>
+              <label class="project-detail-field project-detail-field--narrow">
+                <span>Status</span>
+                <select id="projectDetailStatus">
+                  <option value="active">Active</option>
+                  <option value="paused">Paused</option>
+                  <option value="done">Done</option>
+                  <option value="archived">Archived</option>
+                </select>
+              </label>
+            </div>
+            <label class="project-detail-field">
+              <span>Description</span>
+              <input id="projectDetailDescription" type="text" placeholder="One-line summary" autocomplete="off">
+            </label>
+            <label class="project-detail-field">
+              <span>Notes</span>
+              <textarea id="projectDetailNotes" rows="3" placeholder="Free-form notes…"></textarea>
+            </label>
+            <div class="project-detail-tasks-head">
+              <strong>Open tasks</strong>
+              <span id="projectDetailTaskCount" class="memory-stat">0</span>
+            </div>
+            <ul id="projectDetailTasks" class="project-task-list"></ul>
+            <form id="projectDetailTaskForm" class="project-task-add">
+              <input id="projectDetailTaskInput" type="text" placeholder="Add a task…" autocomplete="off">
+              <button type="submit">Add</button>
+            </form>
+            <div class="project-detail-actions">
+              <button id="projectDetailActivate" type="button" class="ghost-button">Activate on this chat</button>
+              <button id="projectDetailDelete" type="button" class="danger-button">Delete project</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="memory-section">
+          <div class="memory-section-head">
+            <h3>Profile</h3>
+            <span id="profileStatus" class="memory-stat">0 / 8 fields</span>
+          </div>
+          <p class="popover-hint">Curated facts about you. Injected into every reply.</p>
+          <form id="profileForm" class="profile-form" autocomplete="off">
+            <label class="profile-field">
+              <span>Name</span>
+              <input type="text" data-field="name" placeholder="e.g. Rayan">
+            </label>
+            <label class="profile-field">
+              <span>Occupation</span>
+              <input type="text" data-field="occupation" placeholder="e.g. Software engineer">
+            </label>
+            <label class="profile-field">
+              <span>Projects</span>
+              <input type="text" data-field="projects" placeholder="e.g. Hunt (this), Travel Planner">
+            </label>
+            <label class="profile-field">
+              <span>Interests</span>
+              <input type="text" data-field="interests" placeholder="e.g. AI, Telugu music, hiking">
+            </label>
+            <label class="profile-field">
+              <span>Preferred tone</span>
+              <input type="text" data-field="preferred_tone" placeholder="e.g. Short and direct">
+            </label>
+            <label class="profile-field">
+              <span>Daily schedule</span>
+              <input type="text" data-field="daily_schedule" placeholder="e.g. Focus 9-1, calls 2-5">
+            </label>
+            <label class="profile-field">
+              <span>Frequent contacts</span>
+              <input type="text" data-field="frequent_contacts" placeholder="e.g. Rahul, Vishnu, Ayesha">
+            </label>
+            <label class="profile-field">
+              <span>Goals</span>
+              <input type="text" data-field="goals" placeholder="e.g. Ship Doonzi v1 by Q3">
+            </label>
+          </form>
+        </section>
+
+        <section class="memory-section">
+          <div class="memory-section-head">
+            <h3>This chat</h3>
+            <span id="memorySessionStatus" class="memory-stat">— / 10 turns</span>
+          </div>
+          <p id="memorySessionSummary" class="memory-summary">No summary yet. Summaries appear once the conversation exceeds 10 exchanges.</p>
+        </section>
+
+        <section class="memory-section">
+          <div class="memory-section-head">
+            <h3>Recent turns</h3>
+          </div>
+          <ol id="memoryRecentList" class="memory-recent" aria-live="polite">
+            <li class="memory-empty">No turns yet.</li>
+          </ol>
+        </section>
+
+        <section class="memory-section">
+          <div class="memory-section-head">
+            <h3>Profile facts</h3>
+            <button id="memoryRefreshButton" type="button" class="ghost-button">Refresh</button>
+          </div>
+          <ul id="memoryFactsList" class="memory-facts" aria-live="polite">
+            <li class="memory-empty">No facts saved yet. Say "remember that…" or "my name is…".</li>
+          </ul>
+        </section>
+      </aside>
+      <div id="memoryPanelScrim" class="memory-panel-scrim" hidden
+        onclick="(function(){var p=document.getElementById('memoryPanel');var s=document.getElementById('memoryPanelScrim');if(p){p.hidden=true;}if(s){s.hidden=true;}var b=document.getElementById('memoryButton');if(b){b.setAttribute('aria-expanded','false');}document.body.classList.remove('memory-open');})()"></div>
+    </header>
+
+    <main class="shell">
+      <section class="hero" aria-label="Voice assistant">
+        <div class="orb-wrap">
+          <svg class="mic-ring" viewBox="0 0 200 200" aria-hidden="true">
+            <circle class="mic-ring-track" cx="100" cy="100" r="94"></circle>
+            <circle id="micRingFill" class="mic-ring-fill" cx="100" cy="100" r="94"
+              stroke-dasharray="590.6" stroke-dashoffset="590.6"
+              transform="rotate(-90 100 100)"></circle>
+          </svg>
+          <button id="orbButton" class="orb-button" type="button" aria-label="Tap to speak">
+            <span class="orb-glow"></span>
+            <span class="energy-path path-one"></span>
+            <span class="energy-path path-two"></span>
+            <span class="energy-path path-three"></span>
+            <span class="energy-path path-four"></span>
+            <span class="orb-core"><span id="orbText">Hi</span></span>
+          </button>
+        </div>
+
+        <div class="hero-text">
+          <h1 id="heroTitle">How can I help today?</h1>
+          <p id="sessionHint">Ready for text or voice input.</p>
+        </div>
+
+        <div class="hero-controls">
+          <button id="voiceButton" class="voice-button" type="button">
+            <span class="rec-dot" aria-hidden="true"></span>
+            <span>Tap to speak</span>
+          </button>
+          <div id="levelMeter" class="level-meter" aria-label="Microphone input level">
+            <div class="level-meter-bar"><div id="levelMeterFill" class="level-meter-fill"></div></div>
+            <span id="levelMeterLabel" class="level-meter-label">Mic idle</span>
+          </div>
+          <p class="control-hint">Tap once to start, tap again to stop. Or hold <kbd>Space</kbd>.</p>
+        </div>
+
+        <button id="expandButton" class="icon-button focus-input" type="button" aria-label="Focus chat input">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </button>
+      </section>
+
+      <section class="conversation" aria-label="Chat with Hunt">
+        <header class="conv-header">
+          <h2>Conversation</h2>
+          <div class="conv-header-actions">
+            <div id="speechControls" class="speech-controls" role="toolbar" aria-label="Speech controls" hidden>
+              <span class="speech-status" id="speechStatus" aria-live="polite">Speaking…</span>
+              <button id="pauseSpeechButton" type="button" class="speech-control" aria-label="Pause speaking">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
+                  <rect x="6" y="5" width="4" height="14" rx="1"></rect>
+                  <rect x="14" y="5" width="4" height="14" rx="1"></rect>
+                </svg>
+                <span id="pauseSpeechLabel">Pause</span>
+              </button>
+              <button id="stopSpeechButton" type="button" class="speech-control speech-stop" aria-label="Stop speaking and generation">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
+                  <rect x="6" y="6" width="12" height="12" rx="1.5"></rect>
+                </svg>
+                <span>Stop</span>
+              </button>
+            </div>
+            <button id="clearButton" class="ghost-button" type="button">Clear</button>
+          </div>
+        </header>
+        <section id="messages" class="messages" aria-live="polite">
+          <article class="message assistant">
+            <div class="message-meta">Hunt</div>
+            <div class="message-body">I am ready. Type a message or hold the voice button and speak.</div>
+          </article>
+        </section>
+      </section>
+
+      <section id="transcriptReview" class="transcript-review" hidden>
+        <label for="transcriptInput">Review transcript</label>
+        <textarea id="transcriptInput" rows="2"></textarea>
+        <div class="review-actions">
+          <button id="sendTranscriptButton" type="button">Send transcript</button>
+          <button id="cancelTranscriptButton" type="button">Cancel</button>
+        </div>
+      </section>
+
+      <section class="composer-stack" aria-label="Compose">
+        <div class="quick-chips" id="quickChips">
+          <button type="button" data-prompt="Brief me">Brief me</button>
+          <button type="button" data-prompt="Read my open tasks">Read tasks</button>
+          <button type="button" data-prompt="Suggest three real beach destinations for a long weekend trip with friends, including the country." data-role="brain">Plan a beach trip</button>
+          <button type="button" data-prompt="Summarize what you can do in five short bullets." data-role="fast">Capabilities</button>
+          <button type="button" data-prompt="Wrap up the session">Wrap up</button>
+        </div>
+        <form id="chatForm" class="composer">
+          <textarea id="messageInput" rows="1" placeholder="Ask Hunt anything…" autocomplete="off"></textarea>
+          <button id="sendButton" type="submit" aria-label="Send">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+              <polyline points="12 5 19 12 12 19"></polyline>
+            </svg>
+          </button>
+        </form>
+        <p class="composer-hint"><kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for newline · hold <kbd>Space</kbd> to speak</p>
+      </section>
+    </main>
+
+    <script src="/static/app.js?v=memfix3"></script>
+  </body>
+</html>

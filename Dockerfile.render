@@ -1,0 +1,42 @@
+# Hunt — Render deployment image
+# Slim Python base, ffmpeg + libsndfile for Whisper, no desktop deps.
+# Render binds $PORT at runtime; we honor it in the CMD below.
+
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HF_HOME=/data/hf-cache \
+    SENTENCE_TRANSFORMERS_HOME=/data/st-cache \
+    WHISPER_CACHE_DIR=/data/whisper-cache
+
+# System deps. ffmpeg is what Whisper uses to decode anything-not-PCM,
+# libsndfile1 is what soundfile uses to read WAV/FLAC/OGG.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libsndfile1 \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python deps first (cached separately from app code)
+COPY requirements_render.txt .
+RUN pip install -r requirements_render.txt
+
+# Now copy application code. .dockerignore strips dev / data dirs.
+COPY . .
+
+# Render uses ephemeral disk on free tier — these dirs become persistent
+# only when you attach a Render disk (set in render.yaml). On free tier
+# Chroma data is lost on restart; that's acceptable for a demo.
+RUN mkdir -p /data/chroma /data/hf-cache /data/st-cache /data/whisper-cache logs
+
+EXPOSE 8001
+
+# Render injects $PORT — shell form expands it. Bind 0.0.0.0 (not 127.0.0.1)
+# so Render's proxy can reach the app.
+CMD python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8001}

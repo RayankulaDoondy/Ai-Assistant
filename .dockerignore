@@ -1,0 +1,46 @@
+# Don't ship these to the image — bloats it, slows builds, leaks secrets.
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+.gitattributes
+.github/
+.idea/
+.vscode/
+.claude/
+*.log
+logs/
+data/
+tmp/
+*.tmp
+
+# Local-only env (use Render dashboard for secrets)
+.env
+.env.local
+.env.*.local
+
+# Docs / dev-only
+README.md
+ARCHITECTURE.md
+CHECKLIST.md
+DOCKER.md
+PROJECT_COMPLETE.md
+QUICKSTART.md
+ROADMAP.md
+SETUP.md
+RENDER_DEPLOY.md
+pip_install_output.txt
+
+# Tests & dev scripts
+test_*.py
+*_test.py
+tests/
+run.bat
+setup.bat
+setup.sh
+verify_install.py
+cli.py

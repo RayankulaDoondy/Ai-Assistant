@@ -1,0 +1,78 @@
+# Hunt — Render Blueprint
+# Drop this file in the repo root, push to GitHub, then connect the repo in
+# Render → Blueprints. Render reads this file and provisions everything.
+#
+# Notes:
+#  - free plan: 512MB RAM, sleeps after 15 min idle, ephemeral disk
+#  - if you exceed 512MB (likely with Whisper + Chroma + sentence-transformers),
+#    bump `plan: free` → `plan: starter` ($7/mo, 512MB always-on)
+#    or `plan: standard` ($25/mo, 2GB) for a comfortable headroom.
+#  - persistent disk requires a paid plan; on free, Chroma data resets on restart.
+
+services:
+  - type: web
+    name: hunt
+    runtime: docker
+    dockerfilePath: ./Dockerfile.render
+    plan: free
+    region: oregon          # change to a region close to you/your users
+    branch: main
+    healthCheckPath: /health
+    # Auto-deploy on every push to `branch`
+    autoDeploy: true
+
+    envVars:
+      # ---- LLM routing (you're using OpenRouter, not Ollama, in the cloud) ----
+      - key: OPENROUTER_API_KEY
+        sync: false                 # set in dashboard, don't commit
+      - key: LLM_ROLE_MODELS_JSON
+        value: '{"brain":"openrouter:anthropic/claude-sonnet-4","coder":"openrouter:anthropic/claude-sonnet-4","fast":"openrouter:google/gemini-2.5-flash","vision":"openrouter:anthropic/claude-sonnet-4"}'
+      - key: LLM_ROUTING_ENABLED
+        value: "true"
+      - key: LLM_MODEL
+        value: openrouter:google/gemini-2.5-flash
+      - key: OLLAMA_BASE_URL
+        value: ""                   # empty = skip local Ollama probe
+
+      # ---- Voice ----
+      - key: SPEECH_TO_TEXT_MODEL
+        value: tiny
+      - key: STT_LANGUAGE
+        value: en
+      - key: AUDIO_SAMPLE_RATE
+        value: "16000"
+
+      # ---- Memory ----
+      - key: MEMORY_TYPE
+        value: chroma
+      - key: EMBEDDINGS_MODEL
+        value: all-MiniLM-L6-v2
+      - key: DATA_DIR
+        value: /data
+      - key: CHROMA_PATH
+        value: /data/chroma
+
+      # ---- MongoDB Atlas (you already have this set up) ----
+      - key: MONGO_ENABLED
+        value: "true"
+      - key: MONGODB_URI
+        sync: false                 # paste your atlas URI in dashboard
+      - key: MONGO_DB_NAME
+        value: hunt
+      - key: MONGO_DEVICE_ID
+        value: render-prod-01
+
+      # ---- API ----
+      - key: API_HOST
+        value: 0.0.0.0
+      # PORT is injected by Render, not us; do NOT hardcode here.
+
+      # ---- App ----
+      - key: DEBUG
+        value: "false"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: WEB_SEARCH_ENABLED
+        value: "false"
+      - key: WAKE_WORD
+        value: hunt

@@ -1,0 +1,55 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Personal data (your real profile, conversation history, action log)
+# These live in /data at runtime. Render's container regenerates them on start.
+data/
+!data/.gitkeep
+
+# Logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Downloaded packages / wheels / tarballs (large binary blobs)
+tmp/
+tmp2/
+*.whl
+*.tar.gz
+
+# Pip / setup output
+pip_install_output.txt
+
+# IDEs / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude / agent files
+.claude/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/

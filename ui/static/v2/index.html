@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hunt</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/v2/styles.css?v=nexus9">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">H</span>
+    <div><b>Hunt</b><span>Doonzi</span></div>
+  </div>
+  <button class="gear" id="gear" type="button" aria-label="Settings">
+    <svg class="icon" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  </button>
+</header>
+
+<!-- Diagnostic cards (real backend values) -->
+<aside class="diag" aria-label="System diagnostics">
+  <div class="dcard" id="dgVoice" style="animation-delay:.05s"><i></i><span class="lbl">Voice</span><span class="val">…</span></div>
+  <div class="dcard" id="dgAi"    style="animation-delay:.12s"><i></i><span class="lbl">AI Core</span><span class="val">…</span></div>
+  <div class="dcard" id="dgLat"   style="animation-delay:.19s"><i></i><span class="lbl">Latency</span><span class="val">—</span></div>
+  <div class="dcard" id="dgNeural" style="animation-delay:.26s"><i></i><span class="lbl">Neural Core</span><span class="val">…</span></div>
+</aside>
+
+<!-- Activity timeline (driven by mode changes) -->
+<aside class="timeline" id="timeline" aria-label="Pipeline">
+  <div class="tstep" data-step="listening"><span class="node"></span>Listening</div>
+  <div class="tstep" data-step="thinking"><span class="node"></span>Thinking</div>
+  <div class="tstep" data-step="speaking"><span class="node"></span>Responding</div>
+  <div class="tstep" data-step="done"><span class="node"></span>Completed</div>
+</aside>
+
+<!-- Orb stage -->
+<section class="stage" id="stage">
+  <div class="orb-box">
+    <div class="orb-pulse"></div>
+    <canvas id="orb"></canvas>
+  </div>
+  <div class="status" id="status">How can I help?</div>
+  <div class="subtatus" id="substatus">Tap the orb or type below</div>
+  <div class="viz" id="viz"></div>
+</section>
+
+<!-- Conversation feed (populated by JS) -->
+<section class="feed" id="feed" aria-live="polite"></section>
+
+<!-- Bottom dock: voice FAB + composer -->
+<div class="dockwrap">
+  <button class="voice-fab" id="fab" type="button" aria-label="Talk to Hunt">
+    <span class="ring"></span>
+    <svg class="icon" viewBox="0 0 24 24">
+      <path d="M12 2a4 4 0 0 0-4 4v5a4 4 0 0 0 8 0V6a4 4 0 0 0-4-4z"/>
+      <path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>
+    </svg>
+  </button>
+  <form class="composer" id="composer" autocomplete="off">
+    <input id="input" placeholder="Ask Hunt anything…" autocomplete="off">
+    <button class="send" type="submit" aria-label="Send">
+      <svg class="icon" viewBox="0 0 24 24">
+        <line x1="5" y1="12" x2="19" y2="12"/>
+        <polyline points="12 5 19 12 12 19"/>
+      </svg>
+    </button>
+  </form>
+</div>
+
+<!-- Settings drawer (scrim + drawer) -->
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-label="Settings">
+  <button class="close" id="closeDrawer" type="button" aria-label="Close">
+    <svg class="icon" viewBox="0 0 24 24">
+      <line x1="18" y1="6" x2="6" y2="18"/>
+      <line x1="6" y1="6" x2="18" y2="18"/>
+    </svg>
+  </button>
+  <h2>Settings</h2>
+  <p class="sub">All changes save automatically.</p>
+
+  <div class="dgroup">
+    <div class="gt">Appearance</div>
+    <div class="seg" id="themeSeg">
+      <button type="button" data-th="dark">Dark</button>
+      <button type="button" data-th="light">Light</button>
+    </div>
+  </div>
+
+  <div class="dgroup">
+    <div class="gt">Reply style</div>
+    <div class="seg" id="replySeg">
+      <button type="button" data-r="short">Short</button>
+      <button type="button" data-r="normal">Normal</button>
+      <button type="button" data-r="detailed">Detailed</button>
+    </div>
+  </div>
+
+  <div class="dgroup">
+    <div class="gt">Voice</div>
+    <div class="srow">
+      <div class="h">Speak replies<span class="hint">Browser text-to-speech reads each Hunt reply aloud.</span></div>
+      <div class="tog" id="togSpeak"></div>
+    </div>
+    <div class="srow">
+      <div class="h">Speech rate</div>
+    </div>
+    <input class="drange" id="speechRate" type="range" min="60" max="160" value="100" aria-label="Speech rate">
+  </div>
+
+  <div class="dgroup">
+    <div class="gt">Context</div>
+    <div class="srow">
+      <div class="h">Use memory<span class="hint">Inject profile, project, and recent turns into every reply.</span></div>
+      <div class="tog" id="togMemory"></div>
+    </div>
+    <div class="srow">
+      <div class="h">Live data search<span class="hint">Hunt may consult external sources for fresh facts.</span></div>
+      <div class="tog" id="togLive"></div>
+    </div>
+    <div class="srow">
+      <div class="h">Neural core boost<span class="hint">Prefer the brain (reasoning) model for ambiguous asks.</span></div>
+      <div class="tog" id="togNeural"></div>
+    </div>
+  </div>
+
+  <div class="dgroup">
+    <div class="gt">Navigate</div>
+    <div class="srow"><a class="h" href="/" style="text-decoration:underline;color:var(--orange)">Open legacy UI</a></div>
+    <div class="srow"><a class="h" href="/docs" target="_blank" rel="noopener" style="text-decoration:underline;color:var(--muted)">API docs</a></div>
+  </div>
+</aside>
+
+<script src="/static/v2/orb.js?v=nexus9"></script>
+<script src="/static/v2/app.js?v=nexus9"></script>
+</body>
+</html>
