@@ -53,11 +53,14 @@ services:
         value: /data/chroma
 
       # ---- MongoDB Atlas (you already have this set up) ----
+      # NOTE: the code reads MONGO_URI (no DB), not MONGODB_URI. Same for
+      # MONGO_DB and MONGO_DEVICE_ID. Don't rename these without updating
+      # config/settings.py to match.
       - key: MONGO_ENABLED
         value: "true"
-      - key: MONGODB_URI
+      - key: MONGO_URI
         sync: false                 # paste your atlas URI in dashboard
-      - key: MONGO_DB_NAME
+      - key: MONGO_DB
         value: hunt
       - key: MONGO_DEVICE_ID
         value: render-prod-01
