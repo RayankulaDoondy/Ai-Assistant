@@ -619,7 +619,27 @@
         const fd = new FormData();
         fd.append("audio", blob, "clip.wav");
         const r = await fetch("/voice/transcribe", { method: "POST", body: fd });
-        const j = await r.json();
+
+        // Read body once as text, then parse, so we get useful diagnostics
+        // when the server returns an error page or an empty body (Render
+        // timeout, redeploy mid-request, gateway 5xx) instead of a flat
+        // "Unexpected end of JSON input".
+        let raw = "";
+        try { raw = await r.text(); } catch {}
+        console.log(`[voice] /voice/transcribe → ${r.status} (${raw.length} bytes)`, raw.slice(0, 200));
+        if (!r.ok) {
+          const snippet = raw.slice(0, 140) || "(empty body)";
+          throw new Error(`HTTP ${r.status}: ${snippet}`);
+        }
+        if (!raw) {
+          throw new Error("Empty response from /voice/transcribe (likely a Render timeout — try again in 30s)");
+        }
+        let j;
+        try {
+          j = JSON.parse(raw);
+        } catch (parseErr) {
+          throw new Error(`Server returned non-JSON: ${raw.slice(0, 140)}`);
+        }
         const text = (j.transcript || j.text || "").trim();
         if (!text) {
           const reason = j.reason || "no_speech";

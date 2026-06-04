@@ -55,15 +55,28 @@ class SpeechToText:
         self.microphone_available = False
         self.sounddevice = None
         self.soundfile = None
+        # Split the imports: `soundfile` is pure libsndfile + a tiny C
+        # extension — works headlessly (Render / Docker / CI). `sounddevice`
+        # needs PortAudio + an actual audio device, which headless Linux
+        # containers don't have. Bundling them into one try-block was
+        # silently dropping soundfile on Render and zeroing all of the
+        # audio diagnostics, even though the Groq Whisper path still ran.
+        try:
+            import soundfile as sf
+            self.soundfile = sf
+        except Exception as e:
+            logger.warning(f"soundfile unavailable ({e}) — audio diagnostics will be zero")
+
         try:
             import sounddevice as sd
-            import soundfile as sf
             self.sounddevice = sd
-            self.soundfile = sf
             self.microphone_available = True
             logger.info("Microphone input support initialized")
-        except Exception:
-            logger.warning("Microphone input not available. Install sounddevice and soundfile for voice input.")
+        except Exception as e:
+            logger.info(
+                f"sounddevice unavailable ({e}) — server-side mic recording disabled. "
+                "Browser-side recording still works."
+            )
 
     def _normalize_input_device(self, input_device: Optional[str]):
         """Convert numeric device strings to ints and leave names as strings."""
