@@ -51,7 +51,14 @@ class MemoryStore:
                 name="jarvis_memory",
                 metadata={"hnsw:space": "cosine"}
             )
-            
+
+            # Advanced RAG state — all lazy, loaded on first use so a cold
+            # start doesn't pay the model-download cost. Cleared on writes
+            # so stale BM25 indexes don't shadow new content.
+            self._reranker = None                  # CrossEncoder, lazy
+            self._reranker_load_failed = False     # don't retry every query
+            self._bm25_cache: Dict[tuple, Dict] = {}  # types-tuple -> {"index", "docs", "ids", "metas"}
+
             logger.info(f"Memory store initialized at {persist_dir}")
         except ImportError:
             logger.error("ChromaDB not installed")
@@ -85,7 +92,9 @@ class MemoryStore:
                 documents=[content],
                 metadatas=[metadata]
             )
-            
+            # Any cached BM25 index is now stale — next keyword query rebuilds.
+            self._invalidate_bm25_cache()
+
             logger.info(f"Stored memory: {memory_id} (type: {memory_type})")
             return memory_id
         except Exception as e:
@@ -130,6 +139,328 @@ class MemoryStore:
             logger.error(f"Error retrieving memories: {str(e)}")
             return []
     
+    # ================================================================ #
+    # Advanced RAG — reranker, BM25 hybrid, and multi-source retrieval
+    # ================================================================ #
+
+    def _load_reranker(self):
+        """Lazy-load the cross-encoder reranker. Returns the model or None
+        when unavailable (model download failed, sentence_transformers missing,
+        config disabled). Failure is sticky for the process so we don't retry
+        the import on every query."""
+        if self._reranker is not None:
+            return self._reranker
+        if self._reranker_load_failed:
+            return None
+        try:
+            from config.settings import settings as _settings
+            if not getattr(_settings, "MEMORY_RERANK_ENABLED", False):
+                self._reranker_load_failed = True
+                return None
+            from sentence_transformers import CrossEncoder
+            model_name = getattr(_settings, "MEMORY_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+            logger.info(f"Loading cross-encoder reranker: {model_name}")
+            self._reranker = CrossEncoder(model_name)
+            return self._reranker
+        except Exception as e:
+            logger.warning(f"Reranker unavailable ({e}); falling back to raw cosine ranking")
+            self._reranker_load_failed = True
+            return None
+
+    def rerank_candidates(self, query: str, candidates: List[Dict], top_k: int) -> List[Dict]:
+        """Score (query, candidate.content) pairs with the cross-encoder, return top_k.
+
+        Returns the input list ordered by relevance with a new "rerank_score"
+        field. If reranking is unavailable, returns the candidates trimmed to
+        top_k without reordering.
+        """
+        if not candidates:
+            return []
+        model = self._load_reranker()
+        if model is None:
+            return candidates[:top_k]
+        try:
+            pairs = [(query, (c.get("content") or "")[:2000]) for c in candidates]
+            scores = model.predict(pairs)
+            for c, s in zip(candidates, scores):
+                c["rerank_score"] = float(s)
+            candidates.sort(key=lambda c: c.get("rerank_score", 0.0), reverse=True)
+            return candidates[:top_k]
+        except Exception as e:
+            logger.warning(f"Rerank scoring failed ({e}); using raw cosine order")
+            return candidates[:top_k]
+
+    # ---------------------------------------------------------------- #
+    # BM25 keyword search — complements cosine similarity for exact
+    # terms (URLs, IDs, file paths, brand names) that semantics misses.
+    # ---------------------------------------------------------------- #
+
+    def _invalidate_bm25_cache(self) -> None:
+        """Drop the BM25 index. Called after every write so the next search rebuilds."""
+        if self._bm25_cache:
+            self._bm25_cache.clear()
+
+    @staticmethod
+    def _bm25_tokenize(text: str) -> List[str]:
+        """Cheap tokenizer for BM25: lowercase, split on non-alphanumeric. Good
+        enough for chat/notes content; we don't need stemming here."""
+        import re as _re
+        return [t for t in _re.split(r"[^a-z0-9]+", (text or "").lower()) if t]
+
+    def _build_bm25_for_types(self, types: tuple) -> Dict:
+        """Build (or fetch cached) BM25 index over all docs whose memory_type
+        is in `types`. Cached per types tuple so repeated searches are O(1)."""
+        if types in self._bm25_cache:
+            return self._bm25_cache[types]
+        try:
+            from rank_bm25 import BM25Okapi
+        except Exception as e:
+            logger.info(f"rank_bm25 unavailable ({e}); BM25 disabled")
+            self._bm25_cache[types] = {"index": None, "docs": [], "ids": [], "metas": []}
+            return self._bm25_cache[types]
+
+        if types and len(types) == 1:
+            where = {"type": types[0]}
+        elif types:
+            where = {"type": {"$in": list(types)}}
+        else:
+            where = None
+
+        try:
+            raw = self.collection.get(where=where)
+        except Exception as e:
+            logger.warning(f"BM25 fetch failed ({e}); skipping keyword search")
+            self._bm25_cache[types] = {"index": None, "docs": [], "ids": [], "metas": []}
+            return self._bm25_cache[types]
+
+        docs = raw.get("documents") or []
+        ids = raw.get("ids") or []
+        metas = raw.get("metadatas") or []
+        if not docs:
+            self._bm25_cache[types] = {"index": None, "docs": [], "ids": [], "metas": []}
+            return self._bm25_cache[types]
+
+        tokenized = [self._bm25_tokenize(d) for d in docs]
+        index = BM25Okapi(tokenized)
+        entry = {"index": index, "docs": docs, "ids": ids, "metas": metas}
+        self._bm25_cache[types] = entry
+        logger.debug(f"BM25 index built for types={types}: {len(docs)} docs")
+        return entry
+
+    def keyword_search(self, query: str, limit: int, types: Optional[List[str]] = None) -> List[Dict]:
+        """BM25 keyword search. Returns at most `limit` candidates in score order."""
+        if not query or not query.strip():
+            return []
+        types_tuple = tuple(sorted(types)) if types else tuple()
+        entry = self._build_bm25_for_types(types_tuple)
+        index = entry["index"]
+        if index is None or not entry["docs"]:
+            return []
+        tokens = self._bm25_tokenize(query)
+        if not tokens:
+            return []
+        try:
+            scores = index.get_scores(tokens)
+        except Exception as e:
+            logger.warning(f"BM25 scoring failed ({e}); returning empty keyword hits")
+            return []
+
+        # Pull the top `limit` by score (descending).
+        ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:limit]
+        out = []
+        for rank, i in enumerate(ranked):
+            if scores[i] <= 0:
+                break
+            out.append({
+                "content": entry["docs"][i],
+                "id": entry["ids"][i] if i < len(entry["ids"]) else "",
+                "metadata": entry["metas"][i] if i < len(entry["metas"]) else {},
+                "bm25_score": float(scores[i]),
+                "bm25_rank": rank,
+            })
+        return out
+
+    # ---------------------------------------------------------------- #
+    # Hybrid search — vector + BM25 merged with Reciprocal Rank Fusion.
+    # Multi-source — searches across multiple memory_type values at once.
+    # ---------------------------------------------------------------- #
+
+    def vector_search(self, query: str, limit: int, types: Optional[List[str]] = None) -> List[Dict]:
+        """Cosine similarity search across the given types. Returns ranked candidates."""
+        if not query or not query.strip():
+            return []
+        try:
+            if types and len(types) == 1:
+                where = {"type": types[0]}
+            elif types:
+                where = {"type": {"$in": list(types)}}
+            else:
+                where = None
+            results = self.collection.query(query_texts=[query], n_results=limit, where=where)
+        except Exception as e:
+            logger.warning(f"Vector search failed ({e}); returning empty")
+            return []
+        out: List[Dict] = []
+        if not (results and results.get("documents")):
+            return out
+        docs = results["documents"][0]
+        ids = (results.get("ids") or [[]])[0]
+        metas = (results.get("metadatas") or [[]])[0]
+        dists = (results.get("distances") or [[]])[0]
+        for i, doc in enumerate(docs):
+            out.append({
+                "content": doc,
+                "id": ids[i] if i < len(ids) else "",
+                "metadata": metas[i] if i < len(metas) else {},
+                "distance": float(dists[i]) if i < len(dists) else 0.0,
+                "vector_rank": i,
+            })
+        return out
+
+    def hybrid_search(self, query: str, limit: int, types: Optional[List[str]] = None) -> List[Dict]:
+        """Vector + BM25 merged via Reciprocal Rank Fusion.
+
+        RRF score for an item = sum over each source of 1/(K + rank_in_source).
+        K (default 60) softens the contribution of low-ranked hits. An item
+        ranked #1 in both sources beats an item ranked #1 in only one.
+        """
+        try:
+            from config.settings import settings as _settings
+            hybrid_on = getattr(_settings, "MEMORY_HYBRID_ENABLED", True)
+            rrf_k = int(getattr(_settings, "MEMORY_HYBRID_RRF_K", 60) or 60)
+        except Exception:
+            hybrid_on, rrf_k = True, 60
+
+        # Pull more than `limit` from each source so the merge has material to
+        # work with. Reranker (if enabled) trims back to `limit`.
+        per_source = max(limit * 3, 10)
+        vec = self.vector_search(query, per_source, types=types)
+        if not hybrid_on:
+            return vec[:limit]
+
+        kw = self.keyword_search(query, per_source, types=types)
+        if not kw:
+            return vec[:limit]
+
+        # RRF merge — dedup by id, sum reciprocal ranks.
+        scored: Dict[str, Dict] = {}
+        for hit in vec:
+            key = hit["id"] or hit["content"][:80]
+            scored.setdefault(key, dict(hit))
+            scored[key]["rrf_score"] = scored[key].get("rrf_score", 0.0) + 1.0 / (rrf_k + hit["vector_rank"] + 1)
+        for hit in kw:
+            key = hit["id"] or hit["content"][:80]
+            if key in scored:
+                scored[key]["bm25_score"] = hit["bm25_score"]
+                scored[key]["bm25_rank"] = hit["bm25_rank"]
+            else:
+                scored[key] = dict(hit)
+            scored[key]["rrf_score"] = scored[key].get("rrf_score", 0.0) + 1.0 / (rrf_k + hit["bm25_rank"] + 1)
+
+        merged = sorted(scored.values(), key=lambda c: c.get("rrf_score", 0.0), reverse=True)
+        return merged[:max(limit * 2, limit)]  # keep extras for the reranker
+
+    def retrieve(
+        self,
+        query: str,
+        limit: int = 5,
+        types: Optional[List[str]] = None,
+    ) -> List[Dict]:
+        """Advanced retrieval: hybrid search → rerank → top K.
+
+        This is the entry point higher layers (chat context builder, /memory
+        endpoints) should use going forward. `retrieve_memories` stays for
+        back-compat with anyone calling it directly.
+
+        - `types` filters by memory_type. None = all types.
+        - With reranker on: fetches ~K*4 candidates, rescues the top K by
+          cross-encoder relevance.
+        - With reranker off: returns the top K from hybrid search directly.
+        """
+        if not query or not query.strip():
+            return []
+        try:
+            from config.settings import settings as _settings
+            rerank_on = getattr(_settings, "MEMORY_RERANK_ENABLED", True)
+            fetch_mult = int(getattr(_settings, "MEMORY_RERANK_FETCH_MULTIPLIER", 4) or 4)
+        except Exception:
+            rerank_on, fetch_mult = True, 4
+
+        fetch_k = max(limit * fetch_mult, limit) if rerank_on else limit
+        candidates = self.hybrid_search(query, fetch_k, types=types)
+        if not candidates:
+            return []
+        if rerank_on:
+            return self.rerank_candidates(query, candidates, limit)
+        return candidates[:limit]
+
+    # ---------------------------------------------------------------- #
+    # Multi-source indexing helpers — projects + tasks get embedded too.
+    # ---------------------------------------------------------------- #
+
+    def _delete_by_metadata(self, metadata_filter: Dict) -> int:
+        """Delete all stored memories matching a metadata filter. Returns count."""
+        try:
+            existing = self.collection.get(where=metadata_filter)
+            ids = existing.get("ids") or []
+            if not ids:
+                return 0
+            self.collection.delete(ids=ids)
+            self._invalidate_bm25_cache()
+            return len(ids)
+        except Exception as e:
+            logger.warning(f"Delete-by-metadata failed ({e}); skipping")
+            return 0
+
+    def index_project(self, project: Dict) -> Optional[str]:
+        """Embed a project record so it surfaces in semantic + keyword search.
+        Re-indexes (deletes old + writes new) so updates stay consistent."""
+        pid = project.get("id")
+        if not pid:
+            return None
+        # Drop any prior chunks for this project.
+        self._delete_by_metadata({"project_id": pid})
+
+        bits: List[str] = []
+        bits.append(f"Project: {project.get('name', '')}")
+        if project.get("stack"):
+            bits.append(f"Stack: {project['stack']}")
+        if project.get("status"):
+            bits.append(f"Status: {project['status']}")
+        if project.get("description"):
+            bits.append(f"Description: {project['description']}")
+        if project.get("notes"):
+            bits.append(f"Notes: {project['notes']}")
+        content = "\n".join(b for b in bits if b)
+        if not content.strip():
+            return None
+        mid = self.store_memory(
+            content=content,
+            memory_type="project",
+            metadata={"project_id": pid, "project_name": project.get("name", "")},
+        )
+        # Index each open task as its own searchable chunk so "what tasks did
+        # we plan for X" can hit individual task text, not just the project blob.
+        for task in (project.get("open_tasks") or []):
+            t_text = (task.get("text") or "").strip()
+            if not t_text:
+                continue
+            self.store_memory(
+                content=f"Task on {project.get('name','project')}: {t_text}",
+                memory_type="task",
+                metadata={
+                    "project_id": pid,
+                    "task_id": task.get("id"),
+                    "done": bool(task.get("done")),
+                },
+            )
+        return mid
+
+    def remove_project_index(self, project_id: str) -> int:
+        """Drop all indexed content tied to this project (project blob + tasks)."""
+        n = self._delete_by_metadata({"project_id": project_id})
+        return n
+
     def update_memory(self, memory_id: str, content: str, metadata: Dict = None) -> bool:
         """Update a memory item"""
         try:
@@ -142,16 +473,18 @@ class MemoryStore:
                 documents=[content],
                 metadatas=[metadata]
             )
+            self._invalidate_bm25_cache()
             logger.info(f"Updated memory: {memory_id}")
             return True
         except Exception as e:
             logger.error(f"Error updating memory: {str(e)}")
             return False
-    
+
     def delete_memory(self, memory_id: str) -> bool:
         """Delete a memory item"""
         try:
             self.collection.delete(ids=[memory_id])
+            self._invalidate_bm25_cache()
             logger.info(f"Deleted memory: {memory_id}")
             return True
         except Exception as e:
@@ -428,11 +761,16 @@ class ConversationMemory:
             logger.error(f"Compaction failed, leaving buffer intact: {e}")
     
     def get_context(self, query: str, limit: int = 5) -> str:
-        """Get relevant long-term conversation context via semantic search."""
-        relevant_memories = self.memory_store.retrieve_memories(
+        """Get relevant long-term conversation context via the advanced
+        retrieve pipeline (hybrid vector+BM25 search → cross-encoder rerank).
+
+        Conversation-only — for multi-source context that also taps projects /
+        tasks / documents, see `get_multi_source_context`.
+        """
+        relevant_memories = self.memory_store.retrieve(
             query=query,
             limit=limit,
-            memory_type="conversation"
+            types=["conversation"],
         )
 
         if not relevant_memories:
@@ -443,6 +781,49 @@ class ConversationMemory:
             context_parts.append(f"- {memory['content'][:200]}...")
 
         return "\n".join(context_parts)
+
+    def get_multi_source_context(self, query: str, limit: int = 5) -> str:
+        """Search ALL configured memory types (conversation, project, task,
+        document) and format the merged hits as a single context block.
+
+        Each hit is labelled by source type so the LLM can attribute facts
+        ("from a stored document" vs "from an earlier chat") without us
+        having to wire structured tool calls.
+        """
+        try:
+            from config.settings import settings as _settings
+            raw = (getattr(_settings, "MEMORY_SEARCH_TYPES", "conversation") or "").strip()
+            types = [t.strip() for t in raw.split(",") if t.strip()]
+        except Exception:
+            types = ["conversation", "project", "task", "document"]
+
+        hits = self.memory_store.retrieve(query=query, limit=limit, types=types or None)
+        if not hits:
+            return ""
+
+        # Group by type so the prompt block reads top-down by source.
+        by_type: Dict[str, List[Dict]] = {}
+        for h in hits:
+            t = ((h.get("metadata") or {}).get("type") or "memory")
+            by_type.setdefault(t, []).append(h)
+
+        order = ["project", "task", "document", "conversation"]
+        out_lines: List[str] = ["Relevant context from your memory:"]
+        for t in order:
+            items = by_type.get(t, [])
+            if not items:
+                continue
+            label = {
+                "project": "Projects",
+                "task": "Open tasks",
+                "document": "Documents",
+                "conversation": "Past chat",
+            }.get(t, t.title())
+            out_lines.append(f"[{label}]")
+            for h in items:
+                snippet = (h.get("content") or "")[:240].replace("\n", " ")
+                out_lines.append(f"- {snippet}")
+        return "\n".join(out_lines)
 
     def get_session_messages(self, limit: int = 10) -> List[Dict[str, str]]:
         """Return the most recent in-session exchanges as chat-style messages.

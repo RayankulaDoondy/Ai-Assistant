@@ -12,7 +12,7 @@ Roles:
 """
 import json
 import logging
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Union
 
 from config import settings
 
@@ -44,12 +44,20 @@ DEFAULT_ROLE = "fast"
 KNOWN_ROLES = ("brain", "coder", "fast", "vision")
 
 
+RoleValue = Union[str, List[str]]  # either a single model or an ordered fallback chain
+
+
 class ModelRouter:
-    """Maintains the role→model map and picks a concrete model per request."""
+    """Maintains the role→model(s) map and picks a model (or chain) per request.
+
+    Each role can map to either:
+      - a single model name (string)            — back-compat with old configs
+      - a list of model names (fallback chain)  — try in order; first that works wins
+    """
 
     def __init__(self, llm_engine):
         self.llm_engine = llm_engine
-        self._roles: Dict[str, str] = self._load_default_roles()
+        self._roles: Dict[str, RoleValue] = self._load_default_roles()
         # Cache the available-models list briefly so we don't hit Ollama once
         # per chat turn just to check what's pulled.
         self._available_cache: Optional[set] = None
@@ -57,21 +65,44 @@ class ModelRouter:
         self._available_cache_max_hits = 25
 
     @staticmethod
-    def _load_default_roles() -> Dict[str, str]:
+    def _normalize_role_value(v) -> Optional[RoleValue]:
+        """Accept either a string or a non-empty list of strings; reject everything else."""
+        if isinstance(v, str) and v:
+            return v
+        if isinstance(v, (list, tuple)):
+            cleaned = [str(item) for item in v if isinstance(item, str) and item]
+            return cleaned if cleaned else None
+        return None
+
+    @classmethod
+    def _load_default_roles(cls) -> Dict[str, RoleValue]:
         try:
             data = json.loads(settings.LLM_ROLE_MODELS_JSON)
             if isinstance(data, dict):
-                return {k: v for k, v in data.items() if k in KNOWN_ROLES and v}
+                out: Dict[str, RoleValue] = {}
+                for k, v in data.items():
+                    if k not in KNOWN_ROLES:
+                        continue
+                    norm = cls._normalize_role_value(v)
+                    if norm is not None:
+                        out[k] = norm
+                return out
         except (json.JSONDecodeError, AttributeError) as e:
             logger.warning(f"Could not parse LLM_ROLE_MODELS_JSON ({e}); using empty role map")
         return {}
 
-    def get_roles(self) -> Dict[str, str]:
+    def get_roles(self) -> Dict[str, RoleValue]:
         return dict(self._roles)
 
-    def set_roles(self, roles: Dict[str, str]) -> Dict[str, str]:
+    def set_roles(self, roles: Dict[str, RoleValue]) -> Dict[str, RoleValue]:
         """Replace the role map (runtime only — restart restores from settings)."""
-        cleaned = {k: v for k, v in (roles or {}).items() if k in KNOWN_ROLES and v}
+        cleaned: Dict[str, RoleValue] = {}
+        for k, v in (roles or {}).items():
+            if k not in KNOWN_ROLES:
+                continue
+            norm = self._normalize_role_value(v)
+            if norm is not None:
+                cleaned[k] = norm
         self._roles = cleaned
         # Force re-check of available models on next pick.
         self._available_cache = None
@@ -90,33 +121,47 @@ class ModelRouter:
         self._available_cache_hits = 0
         return models
 
-    @staticmethod
-    def _is_available(model: str, available: set) -> bool:
+    # Known provider prefixes (must match brain.llm_engine.LLMEngine.OPENAI_COMPAT_PROVIDERS).
+    _PROVIDER_KEY_ATTR = {
+        "openrouter": "OPENROUTER_API_KEY",
+        "groq":       "GROQ_API_KEY",
+        "gemini":     "GEMINI_API_KEY",
+    }
+
+    @classmethod
+    def _is_available(cls, model: str, available: set) -> bool:
         """Whether a routed model can actually be used right now.
 
-        OpenRouter models (prefixed "openrouter:") are usable as long as an API
-        key is configured — they never appear in Ollama's local tag list. Local
-        models are usable if pulled, or if we couldn't read the tag list at all
-        (empty `available` means "assume present" rather than block everything).
+        Cloud models (prefixed with a known provider name) are usable as long as
+        that provider's API key is set — they never appear in Ollama's local tag
+        list. Local models are usable if pulled, or if we couldn't read the tag
+        list at all (empty `available` means "assume present" rather than block
+        everything).
         """
-        if model.startswith("openrouter:"):
-            return bool(getattr(settings, "OPENROUTER_API_KEY", ""))
+        for prefix, key_attr in cls._PROVIDER_KEY_ATTR.items():
+            if model.startswith(prefix + ":"):
+                return bool(getattr(settings, key_attr, ""))
         return (not available) or (model in available)
+
+    @classmethod
+    def _filter_available_chain(cls, value: RoleValue, available: set) -> List[str]:
+        """Take a string or list role value, return the subset that's actually usable now."""
+        if isinstance(value, str):
+            return [value] if cls._is_available(value, available) else []
+        return [m for m in value if cls._is_available(m, available)]
 
     def pick_model(
         self,
         intent: Optional[str],
         voice_mode: bool = False,
         explicit_role: Optional[str] = None,
-    ) -> str:
-        """Return the model name to use for one /chat call.
+    ) -> Union[str, List[str]]:
+        """Return the model (or fallback chain) to use for one /chat call.
 
-        Resolution order:
-          1. If routing is disabled, return the engine's current default.
-          2. Pick a role: explicit override > voice → fast > intent → role.
-          3. If that role's model is pulled in Ollama, use it.
-          4. Otherwise fall back to settings.LLM_ROLE_FALLBACK's model.
-          5. Otherwise fall back to the engine's current default model.
+        Backward compatible: returns a single string when only one candidate is
+        usable, or when the role config was a single string. Returns a list when
+        multiple fallback models are configured AND usable — the LLM engine will
+        try them in order.
         """
         if not getattr(settings, "LLM_ROUTING_ENABLED", True):
             return self.llm_engine.model_name
@@ -129,27 +174,31 @@ class ModelRouter:
             role = INTENT_TO_ROLE.get((intent or "").lower(), DEFAULT_ROLE)
 
         available = self._available_models()
+        # Build the ordered candidate list: the role's chain, then the fallback
+        # role's chain, then the engine default — de-duplicated, preserving order.
+        candidates: List[str] = []
+        seen = set()
 
-        preferred = self._roles.get(role)
-        if preferred and self._is_available(preferred, available):
-            return preferred
+        def _extend(value: Optional[RoleValue]):
+            if value is None:
+                return
+            for m in self._filter_available_chain(value, available):
+                if m not in seen:
+                    candidates.append(m)
+                    seen.add(m)
 
-        fallback_role = settings.LLM_ROLE_FALLBACK
-        fallback_model = self._roles.get(fallback_role)
-        if fallback_model and self._is_available(fallback_model, available):
-            if preferred:
-                logger.info(
-                    f"Role '{role}' wants '{preferred}' which is not pulled; "
-                    f"falling back to '{fallback_role}' → '{fallback_model}'"
-                )
-            return fallback_model
+        _extend(self._roles.get(role))
+        if role != settings.LLM_ROLE_FALLBACK:
+            _extend(self._roles.get(settings.LLM_ROLE_FALLBACK))
+        if self.llm_engine.model_name and self.llm_engine.model_name not in seen:
+            candidates.append(self.llm_engine.model_name)
 
-        # Final fallback: whatever the engine was configured with at startup.
-        logger.info(
-            f"No usable model for role '{role}' (preferred={preferred}); "
-            f"using engine default '{self.llm_engine.model_name}'"
-        )
-        return self.llm_engine.model_name
+        if not candidates:
+            logger.info(f"No usable model for role '{role}'; using engine default '{self.llm_engine.model_name}'")
+            return self.llm_engine.model_name
+        if len(candidates) == 1:
+            return candidates[0]
+        return candidates
 
 
 _router: Optional[ModelRouter] = None

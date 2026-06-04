@@ -1,0 +1,58 @@
+# Hunt — Local-dev image (Linux container, runs on Docker Desktop for Windows)
+#
+# Why this exists
+# ---------------
+# Hunt's local Windows + Python 3.13 + uvicorn combo hits a known asyncio
+# deadlock — the server hangs after one request. Linux doesn't have this bug.
+# This image gets us Linux locally without needing a real VM.
+#
+# Key differences vs Dockerfile.render
+# ------------------------------------
+# - No `COPY . .` — source code is volume-mounted from your host, so edits
+#   take effect immediately without rebuilding.
+# - `--reload` flag on uvicorn — auto-restarts on .py file changes.
+# - Workdir is /app, mounted to your local Jarvis directory.
+
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Whisper + sentence-transformers cache live on a named volume so model
+    # downloads survive container rebuilds.
+    HF_HOME=/data/hf-cache \
+    SENTENCE_TRANSFORMERS_HOME=/data/st-cache \
+    WHISPER_CACHE_DIR=/data/whisper-cache
+
+# System deps. ffmpeg + libsndfile1 = Whisper audio decoding.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libsndfile1 \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Only the requirements file lives in the image — code is volume-mounted.
+# This keeps build times short and means you only rebuild when deps change.
+COPY requirements_render.txt /app/requirements_render.txt
+RUN pip install -r /app/requirements_render.txt
+
+# Workspace-awareness deps that aren't in requirements_render.txt
+# (we want them locally for "what am I working on" testing — even though
+# they won't see your Windows desktop from inside the Linux container, they
+# import cleanly so the macros don't crash).
+RUN pip install pygetwindow pyperclip psutil
+
+EXPOSE 8001
+
+# Reload on file changes so edits to brain/*.py, app/main.py, etc. take
+# effect without a container restart. Bind 0.0.0.0 so the host can reach us.
+CMD ["python", "-m", "uvicorn", "app.main:app", \
+     "--host", "0.0.0.0", "--port", "8001", \
+     "--reload", "--reload-dir", "/app/app", \
+     "--reload-dir", "/app/brain", "--reload-dir", "/app/memory", \
+     "--reload-dir", "/app/automation", "--reload-dir", "/app/voice", \
+     "--reload-dir", "/app/config"]

@@ -9,6 +9,7 @@ from .macro_runner import (
     is_macro,
     run_macro,
 )
+from .response_composer import compose_intro, compose_outro, chunk_text
 
 __all__ = [
     "get_llm_engine",
@@ -27,4 +28,7 @@ __all__ = [
     "MacroResult",
     "is_macro",
     "run_macro",
+    "compose_intro",
+    "compose_outro",
+    "chunk_text",
 ]

@@ -251,54 +251,116 @@ class LLMEngine:
 
             num_predict = self._resolve_length_budget(response_length, voice_mode, role)
             temp = self._resolve_temperature(temperature, self.temperature)
-            model = model_override or self.model_name
 
-            provider, real_model = self._provider_and_model(model)
-            if provider == "openrouter":
-                yield from self._stream_openrouter(real_model, messages, num_predict, temp)
-                return
+            # Normalize model_override → ordered list of candidates (fallback chain).
+            # Accept a list (new) or a single string (back-compat).
+            if isinstance(model_override, (list, tuple)):
+                candidates = [str(m) for m in model_override if m]
+            elif model_override:
+                candidates = [model_override]
+            else:
+                candidates = [self.model_name]
+            if not candidates:
+                candidates = [self.model_name]
 
-            response = requests.post(
-                f"{self.base_url}/api/chat",
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "stream": True,
-                    "keep_alive": "10m",
-                    "options": {
-                        "temperature": temp,
-                        "num_ctx": self.max_tokens,
-                        "num_predict": num_predict,
-                    },
-                },
-                timeout=self.request_timeout,
-                stream=True,
-            )
-            response.raise_for_status()
-
-            buffer: List[str] = []
-            for raw in response.iter_lines(decode_unicode=True):
-                if not raw:
-                    continue
+            last_error: Optional[str] = None
+            for idx, model in enumerate(candidates):
+                provider, real_model = self._provider_and_model(model)
                 try:
-                    chunk = json.loads(raw)
-                except json.JSONDecodeError:
+                    yielded_token = False
+                    if provider in self.OPENAI_COMPAT_PROVIDERS:
+                        stream_iter = self._stream_openai_compat(provider, real_model, messages, num_predict, temp)
+                    else:
+                        stream_iter = self._stream_ollama_inner(model, messages, num_predict, temp)
+                    for event_type, payload in stream_iter:
+                        if event_type == "token":
+                            yielded_token = True
+                            yield event_type, payload
+                        elif event_type == "done":
+                            yield event_type, payload
+                            if idx > 0:
+                                logger.info(f"Chat succeeded via fallback model #{idx}: {model}")
+                            return
+                        elif event_type == "error":
+                            last_error = payload
+                            if yielded_token:
+                                # Already streaming — can't restart mid-flight.
+                                yield "error", payload
+                                return
+                            # Otherwise try the next candidate.
+                            logger.warning(f"Model '{model}' failed before any token: {payload}; trying next fallback")
+                            break
+                        else:
+                            yield event_type, payload
+                    else:
+                        # Stream ended without "done" or "error" — treat as success-ish.
+                        return
+                except requests.Timeout:
+                    last_error = f"Timeout calling '{model}'"
+                    logger.warning(f"{last_error}; trying next fallback")
                     continue
-                piece = (chunk.get("message") or {}).get("content", "")
-                if piece:
-                    buffer.append(piece)
-                    yield "token", piece
-                if chunk.get("done"):
-                    break
+                except requests.HTTPError as e:
+                    # 401, 402, 429, 5xx — try next candidate.
+                    last_error = f"{model}: HTTP {e.response.status_code if e.response is not None else '?'} {str(e)[:120]}"
+                    logger.warning(f"{last_error}; trying next fallback")
+                    continue
+                except Exception as e:
+                    last_error = f"{model}: {e}"
+                    logger.warning(f"{last_error}; trying next fallback")
+                    continue
 
-            full = self._strip_thinking("".join(buffer)).strip()
-            yield "done", full
-        except requests.Timeout:
-            logger.error("Ollama streaming timed out")
-            yield "error", "Ollama is taking too long. Try a shorter prompt or use a smaller model."
+            # All candidates exhausted.
+            logger.error(f"All {len(candidates)} models failed. Last error: {last_error}")
+            yield "error", f"All configured models failed. Last error: {last_error or 'unknown'}"
         except Exception as e:
             logger.error(f"Error streaming response: {e}")
             yield "error", "I encountered an error processing your request. Please try again."
+
+    def _stream_ollama_inner(
+        self,
+        model: str,
+        messages: List[Dict],
+        num_predict: int,
+        temperature: float,
+    ) -> Iterator[Tuple[str, str]]:
+        """Streaming chat via local Ollama. Extracted from generate_stream so the
+        fallback-chain dispatcher can call it uniformly alongside the cloud
+        _stream_openai_compat path."""
+        response = requests.post(
+            f"{self.base_url}/api/chat",
+            json={
+                "model": model,
+                "messages": messages,
+                "stream": True,
+                "keep_alive": "10m",
+                "options": {
+                    "temperature": temperature,
+                    "num_ctx": self.max_tokens,
+                    "num_predict": num_predict,
+                },
+            },
+            timeout=self.request_timeout,
+            stream=True,
+        )
+        response.raise_for_status()
+
+        buffer: List[str] = []
+        for raw in response.iter_lines(decode_unicode=True):
+            if not raw:
+                continue
+            try:
+                chunk = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            piece = (chunk.get("message") or {}).get("content", "")
+            if piece:
+                buffer.append(piece)
+                yield "token", piece
+            if chunk.get("done"):
+                break
+
+        full = self._strip_thinking("".join(buffer)).strip()
+        yield "done", full
 
     def _chat_ollama(
         self,
@@ -308,37 +370,58 @@ class LLMEngine:
         temperature_override: Optional[float] = None,
         model_override: Optional[str] = None,
     ) -> str:
-        """Generate through Ollama's /api/chat for proper role handling across models."""
+        """Generate a non-streaming reply, supporting the same fallback chain as
+        generate_stream (model_override can be a list)."""
         # Voice replies stay tight; text replies get room for real recommendations/lists.
         if num_predict_override is not None:
             num_predict = num_predict_override
         else:
             num_predict = self.num_predict if voice_mode else max(self.num_predict, 512)
         temp = self.temperature if temperature_override is None else temperature_override
-        model = model_override or self.model_name
 
-        provider, real_model = self._provider_and_model(model)
-        if provider == "openrouter":
-            return self._chat_openrouter(real_model, messages, num_predict, temp)
+        if isinstance(model_override, (list, tuple)):
+            candidates = [str(m) for m in model_override if m]
+        elif model_override:
+            candidates = [model_override]
+        else:
+            candidates = [self.model_name]
+        if not candidates:
+            candidates = [self.model_name]
 
-        response = requests.post(
-            f"{self.base_url}/api/chat",
-            json={
-                "model": model,
-                "messages": messages,
-                "stream": False,
-                "keep_alive": "10m",
-                "options": {
-                    "temperature": temp,
-                    "num_ctx": self.max_tokens,
-                    "num_predict": num_predict,
-                },
-            },
-            timeout=self.request_timeout,
-        )
-        response.raise_for_status()
-        data = response.json()
-        return (data.get("message") or {}).get("content", "").strip()
+        last_error: Optional[str] = None
+        for idx, model in enumerate(candidates):
+            provider, real_model = self._provider_and_model(model)
+            try:
+                if provider in self.OPENAI_COMPAT_PROVIDERS:
+                    result = self._chat_openai_compat(provider, real_model, messages, num_predict, temp)
+                else:
+                    response = requests.post(
+                        f"{self.base_url}/api/chat",
+                        json={
+                            "model": model,
+                            "messages": messages,
+                            "stream": False,
+                            "keep_alive": "10m",
+                            "options": {
+                                "temperature": temp,
+                                "num_ctx": self.max_tokens,
+                                "num_predict": num_predict,
+                            },
+                        },
+                        timeout=self.request_timeout,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    result = (data.get("message") or {}).get("content", "").strip()
+                if idx > 0:
+                    logger.info(f"Chat succeeded via fallback model #{idx}: {model}")
+                return result
+            except Exception as e:
+                last_error = f"{model}: {e}"
+                logger.warning(f"{last_error}; trying next fallback")
+                continue
+
+        raise RuntimeError(f"All {len(candidates)} models failed. Last error: {last_error}")
 
     @staticmethod
     def _strip_thinking(text: str) -> str:
@@ -348,44 +431,90 @@ class LLMEngine:
         return cleaned.strip()
 
     # ------------------------------------------------------------------ #
-    # Provider routing (Ollama local vs. OpenRouter cloud)
+    # Provider routing
     # ------------------------------------------------------------------ #
-    OPENROUTER_PREFIX = "openrouter:"
+    # Supported prefixes — each maps to (base_url_attr, api_key_attr, timeout_attr).
+    # Anything without a known prefix is treated as a local Ollama model.
+    OPENAI_COMPAT_PROVIDERS: Dict[str, Dict[str, str]] = {
+        "openrouter": {
+            "base_url_attr": "OPENROUTER_BASE_URL",
+            "api_key_attr":  "OPENROUTER_API_KEY",
+            "timeout_attr":  "OPENROUTER_TIMEOUT",
+            "extra_headers_method": "_openrouter_extra_headers",
+        },
+        "groq": {
+            "base_url_attr": "GROQ_BASE_URL",
+            "api_key_attr":  "GROQ_API_KEY",
+            "timeout_attr":  "GROQ_TIMEOUT",
+            "extra_headers_method": "",
+        },
+        "gemini": {
+            "base_url_attr": "GEMINI_BASE_URL",
+            "api_key_attr":  "GEMINI_API_KEY",
+            "timeout_attr":  "GEMINI_TIMEOUT",
+            "extra_headers_method": "",
+        },
+    }
 
     @classmethod
     def _provider_and_model(cls, model: str) -> Tuple[str, str]:
         """Split a routed model name into (provider, real_model_name).
 
-        Names prefixed with "openrouter:" go to OpenRouter (prefix stripped);
-        everything else is a local Ollama model.
+        Names prefixed with a known provider go to that cloud service (prefix
+        stripped); everything else is a local Ollama model.
         """
-        if model and model.startswith(cls.OPENROUTER_PREFIX):
-            return "openrouter", model[len(cls.OPENROUTER_PREFIX):]
+        if not model:
+            return "ollama", model
+        for provider in cls.OPENAI_COMPAT_PROVIDERS:
+            prefix = provider + ":"
+            if model.startswith(prefix):
+                return provider, model[len(prefix):]
         return "ollama", model
 
     @staticmethod
-    def _openrouter_headers() -> Dict[str, str]:
+    def _openrouter_extra_headers() -> Dict[str, str]:
+        # OpenRouter uses these for dashboard attribution; harmless if unset.
         return {
-            "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            # OpenRouter uses these for dashboard attribution; harmless if unset.
             "HTTP-Referer": settings.OPENROUTER_SITE_URL,
             "X-Title": settings.OPENROUTER_APP_NAME,
         }
 
-    def _chat_openrouter(
+    def _provider_request_config(self, provider: str) -> Tuple[str, str, int, Dict[str, str]]:
+        """Look up (base_url, api_key, timeout, extra_headers) for an OpenAI-compatible provider.
+
+        Raises RuntimeError if the API key isn't configured — the caller should
+        translate that into an "error" event or move on to the next fallback.
+        """
+        cfg = self.OPENAI_COMPAT_PROVIDERS.get(provider)
+        if not cfg:
+            raise RuntimeError(f"Unknown provider '{provider}'")
+        base_url = getattr(settings, cfg["base_url_attr"], "")
+        api_key  = getattr(settings, cfg["api_key_attr"], "")
+        timeout  = getattr(settings, cfg["timeout_attr"], 60)
+        if not api_key:
+            raise RuntimeError(f"{cfg['api_key_attr']} is not set")
+        extras_method = cfg.get("extra_headers_method") or ""
+        extras = getattr(self, extras_method)() if extras_method else {}
+        return base_url, api_key, timeout, extras
+
+    def _chat_openai_compat(
         self,
+        provider: str,
         model: str,
         messages: List[Dict],
         num_predict: int,
         temperature: float,
     ) -> str:
-        """Non-streaming chat via OpenRouter's OpenAI-compatible endpoint."""
-        if not settings.OPENROUTER_API_KEY:
-            raise RuntimeError("OPENROUTER_API_KEY is not set")
+        """Non-streaming chat via any OpenAI-compatible provider (OpenRouter / Groq / Gemini)."""
+        base_url, api_key, timeout, extra_headers = self._provider_request_config(provider)
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type":  "application/json",
+            **extra_headers,
+        }
         response = requests.post(
-            f"{settings.OPENROUTER_BASE_URL}/chat/completions",
-            headers=self._openrouter_headers(),
+            f"{base_url}/chat/completions",
+            headers=headers,
             json={
                 "model": model,
                 "messages": messages,
@@ -393,7 +522,7 @@ class LLMEngine:
                 "temperature": temperature,
                 "max_tokens": num_predict,
             },
-            timeout=settings.OPENROUTER_TIMEOUT,
+            timeout=timeout,
         )
         response.raise_for_status()
         data = response.json()
@@ -402,21 +531,29 @@ class LLMEngine:
             return ""
         return (choices[0].get("message") or {}).get("content", "").strip()
 
-    def _stream_openrouter(
+    def _stream_openai_compat(
         self,
+        provider: str,
         model: str,
         messages: List[Dict],
         num_predict: int,
         temperature: float,
     ) -> Iterator[Tuple[str, str]]:
-        """Streaming chat via OpenRouter (SSE). Yields the same ('token'/'done')
-        tuples as generate_stream so the caller is provider-agnostic."""
-        if not settings.OPENROUTER_API_KEY:
-            yield "error", "OpenRouter API key is not set. Add OPENROUTER_API_KEY to .env."
+        """Streaming chat via any OpenAI-compatible provider. Yields the same
+        ('token'/'done') tuples as generate_stream so the caller is provider-agnostic."""
+        try:
+            base_url, api_key, timeout, extra_headers = self._provider_request_config(provider)
+        except RuntimeError as e:
+            yield "error", str(e)
             return
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type":  "application/json",
+            **extra_headers,
+        }
         response = requests.post(
-            f"{settings.OPENROUTER_BASE_URL}/chat/completions",
-            headers=self._openrouter_headers(),
+            f"{base_url}/chat/completions",
+            headers=headers,
             json={
                 "model": model,
                 "messages": messages,
@@ -424,7 +561,7 @@ class LLMEngine:
                 "temperature": temperature,
                 "max_tokens": num_predict,
             },
-            timeout=settings.OPENROUTER_TIMEOUT,
+            timeout=timeout,
             stream=True,
         )
         response.raise_for_status()
@@ -451,6 +588,13 @@ class LLMEngine:
         full = self._strip_thinking("".join(buffer)).strip()
         yield "done", full
 
+    # Back-compat shims — the rest of the engine still imports these names.
+    def _chat_openrouter(self, model, messages, num_predict, temperature):
+        return self._chat_openai_compat("openrouter", model, messages, num_predict, temperature)
+
+    def _stream_openrouter(self, model, messages, num_predict, temperature):
+        yield from self._stream_openai_compat("openrouter", model, messages, num_predict, temperature)
+
     SUMMARIZER_PROMPT = (
         "You are a faithful conversation summarizer for a personal assistant.\n\n"
         "STRICT RULES:\n"
@@ -474,6 +618,15 @@ class LLMEngine:
 
         Used by ConversationMemory to fold the oldest 10 exchanges into a rolling summary
         once the verbatim buffer is full.
+
+        Routes through the same multi-provider fallback chain `/chat` uses
+        (`_chat_ollama` → OpenRouter / Groq / Gemini / local Ollama). The
+        "fast" role is used because summarization is a cheap compression task
+        and we don't want to burn brain-tier tokens on it. Previously this
+        called Ollama directly via `{self.base_url}/api/chat`, which broke
+        any deployment with Ollama disabled (Docker, Render, anywhere
+        `OLLAMA_BASE_URL=""`) — the URL became literally `'/api/chat'` and
+        the summary silently failed every 10 turns.
         """
         try:
             prior_block = (
@@ -490,24 +643,24 @@ class LLMEngine:
                 {"role": "system", "content": self.SUMMARIZER_PROMPT},
                 {"role": "user", "content": user_payload},
             ]
-            response = requests.post(
-                f"{self.base_url}/api/chat",
-                json={
-                    "model": self.model_name,
-                    "messages": messages,
-                    "stream": False,
-                    "keep_alive": "10m",
-                    "options": {
-                        # Low temp for faithful compression, not creativity.
-                        "temperature": 0.2,
-                        "num_ctx": max(self.max_tokens, 4096),
-                        "num_predict": 400,
-                    },
-                },
-                timeout=self.request_timeout,
+
+            # Pick a model via the router — "fast" role keeps summarizer cheap.
+            # Lazy import to avoid circular dependency at module load.
+            try:
+                from brain.model_router import get_model_router
+                router = get_model_router(self)
+                model_override = router.pick_model(intent=None, voice_mode=False, explicit_role="fast")
+            except Exception as e:
+                logger.warning(f"Summarizer: router unavailable ({e}); using engine default model")
+                model_override = self.model_name
+
+            content = self._chat_ollama(
+                messages,
+                voice_mode=False,
+                num_predict_override=400,
+                temperature_override=0.2,
+                model_override=model_override,
             )
-            response.raise_for_status()
-            content = (response.json().get("message") or {}).get("content", "").strip()
             return self._strip_thinking(content)
         except requests.Timeout:
             logger.error("Summarization timed out — keeping prior summary unchanged")
@@ -548,35 +701,59 @@ class LLMEngine:
         """
         return self.generate(prompt)
     
+    def _ollama_disabled(self) -> bool:
+        """Whether the Ollama probe should be skipped entirely.
+
+        True when no base_url is configured (cloud deploys with `OLLAMA_BASE_URL=""`)
+        or when the URL is malformed (no scheme). Either case used to spam the log
+        with "Invalid URL '/api/tags'" every 5 seconds because the legacy UI polls
+        /status; on Render that meant pages of meaningless errors. Returning True
+        from here short-circuits the probe so nothing is logged.
+        """
+        url = (self.base_url or "").strip()
+        if not url:
+            return True
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return True
+        return False
+
     def check_connection(self) -> bool:
-        """Check if Ollama is running and accessible"""
+        """Check if Ollama is running and accessible.
+
+        Returns False (silently) when no Ollama URL is configured — cloud-only
+        deploys don't run Ollama and shouldn't log connection errors for it."""
+        if self._ollama_disabled():
+            return False
         try:
             import requests
-
             response = requests.get(f"{self.base_url}/api/tags", timeout=5)
             return response.status_code == 200
         except Exception as e:
-            logger.error(f"Cannot connect to Ollama: {str(e)}")
-            logger.info(f"Make sure Ollama is running at {self.base_url}")
+            logger.warning(f"Ollama probe failed at {self.base_url}: {e}")
             return False
-    
+
     def set_model(self, model_name: str):
         """Switch to a different model"""
         self.model_name = model_name
         logger.info(f"Switched to model: {model_name}")
-    
+
     def get_available_models(self) -> List[str]:
-        """Get list of models available in Ollama"""
+        """Get list of models available in Ollama.
+
+        Returns [] (silently) when no Ollama URL is configured — same reason as
+        check_connection above. Cloud deploys spam the log without this guard."""
+        if self._ollama_disabled():
+            return []
         try:
             import requests
-            response = requests.get(f"{self.base_url}/api/tags")
+            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
             if response.status_code == 200:
                 models = [model["name"] for model in response.json().get("models", [])]
                 logger.info(f"Available models: {models}")
                 return models
             return []
         except Exception as e:
-            logger.error(f"Error fetching models: {str(e)}")
+            logger.warning(f"Ollama model list failed at {self.base_url}: {e}")
             return []
 
 

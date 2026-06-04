@@ -89,6 +89,12 @@ class SpeechToText:
         """
         Transcribe audio file and return both transcript and audio diagnostics.
 
+        Provider order:
+            1. Groq hosted Whisper (whisper-large-v3-turbo) when GROQ_API_KEY +
+               GROQ_WHISPER_ENABLED. ~10% WER, ~200ms typical, free tier.
+            2. Local openai-whisper (whatever SPEECH_TO_TEXT_MODEL is set to)
+               as a fallback for offline / Groq failures.
+
         Args:
             audio_path: Path to audio file
 
@@ -98,7 +104,6 @@ class SpeechToText:
         """
         diagnostics = {"peak": 0.0, "average": 0.0, "rms": 0.0, "samples": 0, "duration_seconds": 0.0}
         try:
-            self._load_model()
             logger.info(f"Transcribing: {audio_path}")
             audio = self._load_audio_for_whisper(audio_path)
 
@@ -116,6 +121,16 @@ class SpeechToText:
                 if diagnostics["peak"] < 0.005:
                     logger.warning("Audio appears silent (peak < 0.005). Skipping Whisper to avoid hallucination.")
                     return {"transcript": "", "diagnostics": diagnostics, "reason": "silent"}
+
+            # Try hosted Groq Whisper first. Returns None when the provider is
+            # disabled or fails; we then fall through to the local model.
+            groq_result = self._try_transcribe_groq(audio_path, diagnostics)
+            if groq_result is not None:
+                return groq_result
+
+            # Local Whisper fallback. Lazy-load the model so we never pay the
+            # download cost when Groq is doing the work.
+            self._load_model()
 
             # NOTE: We DO NOT pass `initial_prompt` here. Whisper has a
             # well-known failure mode where, on silence or low-confidence
@@ -163,6 +178,91 @@ class SpeechToText:
         except Exception as e:
             logger.error(f"Transcription error: {str(e)}", exc_info=True)
             return {"transcript": "", "diagnostics": diagnostics, "reason": "error"}
+
+    def _try_transcribe_groq(self, audio_path: str, diagnostics: dict) -> Optional[dict]:
+        """POST the WAV to Groq's hosted Whisper. Returns the standard dict
+        on success, or None to signal "fall back to local Whisper".
+
+        Returns None (not an error dict) when:
+            - Groq is disabled by config / no API key
+            - Network/HTTP error reaching Groq
+            - Empty body or unexpected schema
+        These all let the caller transparently use the local model.
+
+        Returns a result dict (with reason="ok" or "low_confidence") when:
+            - Groq replied with a usable transcript (after hallucination filter)
+        """
+        try:
+            from config.settings import settings
+        except Exception:
+            return None
+
+        if not getattr(settings, "GROQ_WHISPER_ENABLED", False):
+            return None
+        api_key = (getattr(settings, "GROQ_API_KEY", "") or "").strip()
+        if not api_key:
+            return None
+
+        base_url = (getattr(settings, "GROQ_BASE_URL", "") or "").rstrip("/")
+        if not base_url:
+            return None
+        model = getattr(settings, "GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
+        timeout = float(getattr(settings, "GROQ_WHISPER_TIMEOUT", 30) or 30)
+
+        try:
+            import requests
+        except Exception as e:
+            logger.warning(f"Groq Whisper: requests not available ({e}); falling back to local Whisper")
+            return None
+
+        url = f"{base_url}/audio/transcriptions"
+        try:
+            with open(audio_path, "rb") as fh:
+                files = {"file": ("voice.wav", fh, "audio/wav")}
+                data = {
+                    "model": model,
+                    "language": self.language or "en",
+                    "temperature": "0.0",
+                    "response_format": "json",
+                }
+                headers = {"Authorization": f"Bearer {api_key}"}
+                logger.info(f"Groq Whisper: POST {url} (model={model})")
+                resp = requests.post(url, headers=headers, files=files, data=data, timeout=timeout)
+        except Exception as e:
+            logger.warning(f"Groq Whisper request failed: {e}; falling back to local Whisper")
+            return None
+
+        if resp.status_code != 200:
+            # 429 (rate limit), 401 (bad key), 5xx — all reasons to fall back.
+            body_preview = (resp.text or "")[:200]
+            logger.warning(
+                f"Groq Whisper non-200: {resp.status_code} body={body_preview!r}; "
+                f"falling back to local Whisper"
+            )
+            return None
+
+        try:
+            payload = resp.json()
+        except Exception as e:
+            logger.warning(f"Groq Whisper bad JSON: {e}; falling back to local Whisper")
+            return None
+
+        text = (payload.get("text") or "").strip()
+        logger.info(f"Groq Whisper raw text: '{text}'")
+
+        # Reuse the same hallucination filter we use for local Whisper. Groq's
+        # Whisper-large-v3-turbo also occasionally returns "Thanks for watching!"
+        # on near-silence, so this is real protection, not paranoia.
+        fake_result = {"text": text}
+        if self._looks_like_low_confidence_result(fake_result):
+            return {"transcript": "", "diagnostics": diagnostics, "reason": "low_confidence"}
+
+        text = self._collapse_repeated_phrases(text)
+        return {
+            "transcript": text,
+            "diagnostics": diagnostics,
+            "reason": "ok" if text else "decode_failed",
+        }
 
     # Known Whisper "I have no audio" fallback phrases. These tend to come
     # from prompt echoes, dataset trailers, or out-of-domain context bleed.

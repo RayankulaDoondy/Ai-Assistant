@@ -34,7 +34,13 @@ logger = logging.getLogger(__name__)
 
 # Intents that should short-circuit the LLM pipeline and dispatch to a macro.
 # Kept narrow so casual phrases never trigger composite actions accidentally.
-MACRO_INTENTS = ("morning_brief", "read_open_tasks", "wrap_up_session")
+MACRO_INTENTS = (
+    "morning_brief",
+    "read_open_tasks",
+    "wrap_up_session",
+    "workspace_query",
+    "read_clipboard",
+)
 
 
 @dataclass
@@ -199,10 +205,111 @@ def _macro_wrap_up_session(ctx: Dict[str, Any]) -> MacroResult:
 
 # ----------------------------------------------------------- registry/runner
 
+def _macro_workspace_query(ctx: Dict[str, Any]) -> MacroResult:
+    """Tell the user what Hunt can see about their desktop right now.
+
+    Pure read-only — no actions, no LLM call. Powered by automation.workspace
+    which is platform-specific (works on Windows/Mac, returns "unavailable"
+    on a headless Linux container).
+    """
+    try:
+        from automation.workspace import (
+            get_workspace_snapshot,
+            format_snapshot_markdown,
+            format_snapshot_speakable,
+        )
+    except Exception as e:
+        return MacroResult(
+            name="workspace_query",
+            script="Workspace awareness isn't installed on this system.",
+            failed=True,
+            error=str(e),
+        )
+
+    snap = get_workspace_snapshot(
+        include_clipboard=False,   # query intent doesn't ask for clipboard
+        include_processes=True,
+        include_windows=True,
+    )
+    return MacroResult(
+        name="workspace_query",
+        script=format_snapshot_speakable(snap),
+        structured={
+            "type": "workspace",
+            "markdown": format_snapshot_markdown(snap, include_clipboard=False),
+            "snapshot": snap.to_dict(),
+        },
+    )
+
+
+def _macro_read_clipboard(ctx: Dict[str, Any]) -> MacroResult:
+    """Read the user's clipboard back to them. Read-only — never writes.
+
+    Resolution order for the clipboard text:
+      1. ctx["client_clipboard"] — the browser sent it (works inside Docker
+         where the container can't see the host's Windows clipboard).
+      2. automation.workspace.get_workspace_snapshot — local pyperclip read
+         (works on native Windows / Mac when running outside a container).
+      3. Empty fallback.
+    """
+    truncated = False
+    client_clip = (ctx.get("client_clipboard") or "").strip() if ctx else ""
+
+    if client_clip:
+        text = client_clip
+        # Cap at the same 4000-char ceiling we use for local reads so we don't
+        # blow up the response on a huge paste.
+        if len(text) > 4000:
+            text = text[:4000]
+            truncated = True
+    else:
+        # Fall back to local probe.
+        try:
+            from automation.workspace import get_workspace_snapshot
+        except Exception as e:
+            return MacroResult(
+                name="read_clipboard",
+                script="Clipboard access isn't installed on this system.",
+                failed=True,
+                error=str(e),
+            )
+        snap = get_workspace_snapshot(
+            include_clipboard=True,
+            include_processes=False,
+            include_windows=False,
+        )
+        text = snap.clipboard
+        truncated = snap.clipboard_truncated
+
+    if not text:
+        return MacroResult(
+            name="read_clipboard",
+            script="Your clipboard is empty.",
+            structured={"type": "clipboard", "text": "", "truncated": False},
+        )
+
+    # Speakable: short preview so we don't read a whole document aloud.
+    preview = text.strip().split("\n")[0]
+    if len(preview) > 120:
+        preview = preview[:120] + "…"
+    spoken = f"Your clipboard starts with: {preview}"
+    return MacroResult(
+        name="read_clipboard",
+        script=spoken,
+        structured={
+            "type": "clipboard",
+            "text": text,
+            "truncated": truncated,
+        },
+    )
+
+
 _REGISTRY: Dict[str, Callable[[Dict[str, Any]], MacroResult]] = {
     "morning_brief":   _macro_morning_brief,
     "read_open_tasks": _macro_read_open_tasks,
     "wrap_up_session": _macro_wrap_up_session,
+    "workspace_query": _macro_workspace_query,
+    "read_clipboard":  _macro_read_clipboard,
 }
 
 

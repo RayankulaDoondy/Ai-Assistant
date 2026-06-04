@@ -1,0 +1,59 @@
+# Hunt — local-dev compose file.
+#
+# Usage
+# -----
+#   docker compose -f docker-compose.dev.yml up --build    (first run)
+#   docker compose -f docker-compose.dev.yml up            (after that)
+#
+# To stop:  Ctrl+C   (or `docker compose -f docker-compose.dev.yml down` from another terminal)
+#
+# Once running, open http://127.0.0.1:8001/v2 in your browser. Same UI, same
+# endpoints, same env vars — but Linux event loop, no more Windows hangs.
+
+services:
+  hunt:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: hunt-dev
+    ports:
+      # Map host port 8001 to container port 8001 — same URL you've been using.
+      - "127.0.0.1:8001:8001"
+    env_file:
+      # Reads your existing .env. Don't commit .env (already in .gitignore).
+      - .env
+    environment:
+      # Inside the container the API binds 0.0.0.0; the .env's API_HOST is
+      # ignored (we override at the uvicorn CMD level).
+      - API_HOST=0.0.0.0
+      - API_PORT=8001
+      # Critical — Render's local Ollama at localhost:11434 isn't reachable
+      # from inside the container even if you have Ollama running on Windows.
+      # Either set this to host.docker.internal:11434 (Docker Desktop magic
+      # hostname) or leave empty to disable the probe entirely. Default empty.
+      - OLLAMA_BASE_URL=
+      # Persistent cache dirs.
+      - CHROMA_PATH=/data/chroma
+      - DATA_DIR=/data
+    volumes:
+      # Live source mount — edit a .py file on your host, --reload picks it
+      # up inside the container in under 2 seconds.
+      - ./app:/app/app
+      - ./brain:/app/brain
+      - ./memory:/app/memory
+      - ./automation:/app/automation
+      - ./voice:/app/voice
+      - ./config:/app/config
+      - ./ui:/app/ui
+      - ./agents:/app/agents
+      - ./api:/app/api
+      - ./vision:/app/vision
+      # Persistent /data — Chroma, profile, sessions, action history.
+      # Use a named volume so it survives `docker compose down -v` (until
+      # you explicitly remove it).
+      - hunt-data:/data
+    restart: unless-stopped
+
+volumes:
+  hunt-data:
+    driver: local

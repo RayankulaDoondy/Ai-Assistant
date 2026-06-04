@@ -381,3 +381,86 @@ button{cursor:pointer;border:none;background:none;color:inherit}
   .stage{padding:90px 16px 20px}
   .feed{padding:0 16px 200px}
 }
+
+/* ---------- topbar action cluster ---------- */
+.topbar-actions{
+  display:flex;align-items:center;gap:10px;pointer-events:auto;
+}
+
+/* Override default rotate-on-hover for non-gear buttons inside cluster */
+.topbar-actions #sessionsBtn:hover,
+.topbar-actions #newChatBtn:hover{transform:translateY(-1px)}
+
+/* ---------- left-slide sessions drawer ---------- */
+.drawer.drawer-left{
+  right:auto;left:0;
+  border-left:none;border-right:1px solid var(--border);
+  transform:translateX(-100%);
+}
+.drawer.drawer-left.open{transform:none}
+.drawer.drawer-left .close{right:auto;left:22px}
+.drawer.drawer-left h2,
+.drawer.drawer-left p.sub,
+.drawer.drawer-left .dgroup{padding-left:48px}
+
+/* ---------- new-chat call-to-action ---------- */
+.new-chat-btn{
+  width:100%;padding:13px 14px;border-radius:13px;
+  background:linear-gradient(135deg,var(--orange),var(--hi));
+  color:#0a0a0a;font-weight:700;font-size:14px;letter-spacing:.04em;
+  border:none;cursor:pointer;transition:.2s;
+  box-shadow:0 0 22px -8px var(--orange);
+}
+.new-chat-btn:hover{filter:brightness(1.05);transform:translateY(-1px)}
+.new-chat-btn:active{transform:translateY(0)}
+
+/* ---------- sessions list ---------- */
+.sessions-list{
+  display:flex;flex-direction:column;gap:8px;
+  max-height:60vh;overflow-y:auto;
+  padding-right:4px;
+}
+.session-row{
+  position:relative;
+  display:flex;flex-direction:column;gap:4px;
+  padding:12px 38px 12px 14px;border-radius:12px;
+  background:var(--bg2);border:1px solid var(--border);
+  cursor:pointer;transition:.15s;text-align:left;
+}
+.session-row .del{
+  position:absolute;top:10px;right:10px;
+  width:24px;height:24px;border-radius:6px;
+  display:grid;place-items:center;
+  background:transparent;border:none;color:var(--faint);
+  opacity:0;transition:.15s;cursor:pointer;
+}
+.session-row:hover .del{opacity:1}
+.session-row .del:hover{background:rgba(220,60,60,.18);color:#ff7676}
+.session-row .del svg{width:14px;height:14px}
+.session-row.current .del{display:none}
+.session-row:hover{
+  border-color:var(--border2);
+  background:color-mix(in srgb, var(--bg2) 80%, var(--orange) 8%);
+}
+.session-row.current{
+  border-color:var(--orange);
+  background:color-mix(in srgb, var(--bg2) 80%, var(--orange) 12%);
+}
+.session-row .title{
+  font-size:14px;color:var(--text);font-weight:600;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden;
+}
+.session-row .meta{
+  font-size:11px;color:var(--faint);
+  display:flex;gap:8px;align-items:center;
+}
+.session-row .meta .dot{
+  width:5px;height:5px;border-radius:50%;background:var(--orange);
+  box-shadow:0 0 8px var(--orange);
+}
+.sessions-empty{
+  padding:18px 14px;border-radius:12px;
+  background:var(--bg2);border:1px dashed var(--border);
+  color:var(--faint);font-size:13px;text-align:center;
+}

@@ -137,6 +137,29 @@ class Reasoning:
                 "close out the session",
             ],
 
+            # Workspace awareness — pure desktop probe, no LLM call. Phrase
+            # list intentionally tight so casual chat ("what am I doing wrong?")
+            # doesn't accidentally trigger a workspace dump.
+            "workspace_query": [
+                "what am i working on",
+                "what am i doing right now",
+                "what windows are open",
+                "what's on my screen", "whats on my screen",
+                "what apps are open",
+                "what's open on my desktop", "whats open on my desktop",
+                "show me my workspace", "show my workspace",
+                "what's my active window", "whats my active window",
+                "describe my workspace",
+            ],
+            "read_clipboard": [
+                "what's in my clipboard", "whats in my clipboard",
+                "read my clipboard", "read clipboard",
+                "what's on my clipboard", "whats on my clipboard",
+                "show me my clipboard", "show my clipboard",
+                "clipboard contents",
+                "what did i copy",
+            ],
+
             # Project context switch — "continue X" / "switch to X" / "work
             # on X". The router doesn't route on this intent; the chat
             # handler reads it, looks the project up in ProjectStore, and

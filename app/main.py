@@ -6,7 +6,8 @@ import os
 import re
 import json as _json
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+import uuid
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -93,6 +94,12 @@ class ChatRequest(BaseModel):
     # Multi-model routing: explicit role override. When set, this wins over
     # the auto-routed role derived from intent.
     role: Optional[str] = None  # "brain" | "coder" | "fast" | "vision"
+    # Client-provided clipboard text. Sent by the v2 UI when the user asks
+    # "what's in my clipboard" — the browser's Clipboard API reads the host
+    # clipboard (with one-time permission) and forwards the content so that
+    # macros like read_clipboard work even when Hunt runs inside a Linux
+    # container that can't see the Windows desktop. Optional everywhere else.
+    client_clipboard: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -342,11 +349,29 @@ async def startup_event():
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint"""
+    """Health check endpoint.
+
+    `llm_connected` reflects whether at least one configured LLM backend is
+    reachable. The legacy implementation only pinged Ollama, which meant the
+    pill went red for users routing entirely to OpenRouter even though chat
+    actually worked. New rule:
+
+      - If OPENROUTER_API_KEY is set, treat OpenRouter as the primary
+        backend and report online without an explicit ping (avoids hammering
+        the OpenRouter API every poll; chat errors will surface naturally
+        if the key is bad or out of credit).
+      - Otherwise fall back to the Ollama probe.
+    """
     try:
-        llm_ok = llm_engine.check_connection() if llm_engine else False
+        import os
+        if os.environ.get("OPENROUTER_API_KEY"):
+            llm_ok = True
+        elif llm_engine:
+            llm_ok = llm_engine.check_connection()
+        else:
+            llm_ok = False
         memory_ok = memory_store is not None
-        
+
         return HealthResponse(
             status="running",
             llm_connected=llm_ok,
@@ -388,7 +413,10 @@ def chat(request: ChatRequest):  # sync: blocking LLM call runs in FastAPI's thr
         # Phase F: macro short-circuit (mirror of /chat/stream). Skip the LLM
         # entirely, run the recipe, and return its script as the response.
         if is_macro(intent):
-            result = run_macro(intent, _macro_ctx())
+            macro_ctx = _macro_ctx()
+            if getattr(request, "client_clipboard", None):
+                macro_ctx["client_clipboard"] = request.client_clipboard
+            result = run_macro(intent, macro_ctx)
             try:
                 conversation_memory.add_exchange(request.message, result.script)
             except Exception as e:
@@ -492,7 +520,13 @@ def _macro_event_stream(intent: str, request: "ChatRequest"):
         "macro": True,
     }) + "\n"
 
-    result = run_macro(intent, _macro_ctx())
+    # Inject client-provided context so the read_clipboard macro can use the
+    # browser-supplied clipboard text instead of probing the container's
+    # (empty) Linux clipboard.
+    macro_ctx = _macro_ctx()
+    if getattr(request, "client_clipboard", None):
+        macro_ctx["client_clipboard"] = request.client_clipboard
+    result = run_macro(intent, macro_ctx)
 
     yield _json.dumps({
         "type": "macro_data",
@@ -603,9 +637,16 @@ def _build_chat_context_and_history(request: "ChatRequest", intent: str = ""):
                 "Summary of earlier turns in THIS chat (already happened — do not "
                 "contradict; refer to it if asked about what was discussed):\n" + running_summary
             )
-        conv_context = conversation_memory.get_context(request.message, limit=3)
-        if conv_context:
-            context_parts.append(conv_context)
+        # Multi-source retrieval: searches conversation + project + task +
+        # document chunks together via hybrid (vector + BM25) + reranker.
+        # Falls back to conversation-only `get_context` if the multi-source
+        # method isn't available on an older snapshot.
+        try:
+            multi_ctx = conversation_memory.get_multi_source_context(request.message, limit=5)
+        except AttributeError:
+            multi_ctx = conversation_memory.get_context(request.message, limit=3)
+        if multi_ctx:
+            context_parts.append(multi_ctx)
     if request.use_live_search and should_use_live_search(request.message) and not is_coder:
         live_results = search_web(request.message, limit=settings.WEB_SEARCH_RESULTS)
         context_parts.append(build_live_context(live_results))
@@ -665,6 +706,17 @@ def chat_stream(request: ChatRequest):  # sync: preamble + sync stream generator
             "model": chosen_model,
             "role": effective_role,
         }) + "\n"
+
+        # Response Composer — wrap the raw LLM output with personality.
+        # The intro streams BEFORE the LLM tokens (so the user sees "Here you go."
+        # immediately), then the LLM streams its answer, then the outro streams
+        # AFTER. Voice mode bypasses the composer (the user wants the answer
+        # spoken, not "Here you go." preambled).
+        from brain import compose_intro, compose_outro, chunk_text
+        intro = compose_intro(intent, effective_role, request.voice_mode)
+        for piece in chunk_text(intro):
+            yield _json.dumps({"type": "token", "content": piece}) + "\n"
+
         collected: List[str] = []
         try:
             for event_type, payload in llm_engine.generate_stream(
@@ -683,8 +735,18 @@ def chat_stream(request: ChatRequest):  # sync: preamble + sync stream generator
                 elif event_type == "done":
                     # Use the streamer's cleaned full text when present, fall back
                     # to the concatenation of tokens (also cleaned of <think> tags).
-                    full = payload or "".join(collected)
-                    full = full.strip()
+                    llm_text = (payload or "".join(collected)).strip()
+
+                    # Composer outro — appears AFTER the LLM answer, offering
+                    # next-step nudges. Empty for voice / trivial replies.
+                    outro = compose_outro(intent, llm_text, effective_role, request.voice_mode)
+                    for piece in chunk_text(outro):
+                        yield _json.dumps({"type": "token", "content": piece}) + "\n"
+
+                    # Build the canonical full text we persist + return in done.
+                    # Includes intro + LLM body + outro so memory shows what the
+                    # user actually saw.
+                    full = (intro or "") + llm_text + (outro or "")
                     try:
                         conversation_memory.add_exchange(request.message, full)
                     except Exception as e:
@@ -726,7 +788,14 @@ async def transcribe_voice(audio: UploadFile = File(...)):
         if not audio_bytes:
             raise HTTPException(status_code=400, detail="No audio received")
 
-        result = stt_engine.transcribe_bytes_with_diagnostics(audio_bytes)
+        # Whisper.transcribe is synchronous and CPU-heavy (~1-3s on tiny
+        # model). Calling it directly inside an async endpoint blocks the
+        # entire event loop, which means /health, /chat/stream and every
+        # other request stalls until transcription finishes. On Windows
+        # this also tends to leave the loop in a degraded state. Punt to
+        # a threadpool so the loop stays responsive.
+        from starlette.concurrency import run_in_threadpool
+        result = await run_in_threadpool(stt_engine.transcribe_bytes_with_diagnostics, audio_bytes)
         transcript = result.get("transcript", "")
         reason = result.get("reason", "ok")
         diagnostics = result.get("diagnostics") or {}
@@ -809,16 +878,139 @@ async def store_memory(request: MemoryRequest):
 
 
 @app.get("/memory/retrieve")
-async def retrieve_memories(query: str, limit: int = 3):
-    """Retrieve memories using semantic search"""
+async def retrieve_memories(query: str, limit: int = 3, types: Optional[str] = None):
+    """Retrieve memories using the advanced RAG pipeline.
+
+    Query params:
+        query — required user query string
+        limit — top K to return (default 3)
+        types — comma-separated memory types to search (e.g. "conversation,document").
+                Default: all configured types from MEMORY_SEARCH_TYPES.
+    """
     try:
         if not memory_store:
             raise HTTPException(status_code=503, detail="Memory not initialized")
 
-        memories = memory_store.retrieve_memories(query, limit)
+        type_list = None
+        if types:
+            type_list = [t.strip() for t in types.split(",") if t.strip()]
+
+        try:
+            memories = memory_store.retrieve(query=query, limit=limit, types=type_list)
+        except AttributeError:
+            # Fallback for the old single-type API.
+            memories = memory_store.retrieve_memories(query, limit)
         return {"memories": memories, "count": len(memories)}
     except Exception as e:
         logger.error(f"Memory retrieval error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================== #
+# Document RAG endpoints — upload, list, delete, rebuild-index.
+# ============================================================== #
+
+@app.post("/documents/upload")
+async def upload_document(
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(None),
+):
+    """Ingest a document into Hunt's RAG index.
+
+    Accepts: txt, md, source code, pdf. The file is saved under
+    DOCUMENT_STORE_DIR, then chunked and indexed in Chroma as
+    memory_type="document". Subsequent chats can retrieve it via the
+    multi-source context builder.
+    """
+    try:
+        from memory.document_ingestor import ingest_file
+
+        # Save the upload to the persistent document directory.
+        from config.settings import settings as _settings
+        store_dir = getattr(_settings, "DOCUMENT_STORE_DIR", "./data/documents")
+        os.makedirs(store_dir, exist_ok=True)
+        safe_name = os.path.basename(file.filename or "upload")
+        # Prefix with a short uuid so two files with the same name coexist.
+        prefix = uuid.uuid4().hex[:8]
+        dest_path = os.path.join(store_dir, f"{prefix}_{safe_name}")
+
+        content = await file.read()
+        with open(dest_path, "wb") as fh:
+            fh.write(content)
+
+        from starlette.concurrency import run_in_threadpool
+        result = await run_in_threadpool(ingest_file, dest_path, title, None)
+        if result.get("error"):
+            # Remove the saved file when ingestion failed cleanly so we
+            # don't leave orphan bytes on disk.
+            try:
+                os.remove(dest_path)
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail=result["error"])
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Document upload error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/documents")
+async def list_documents_endpoint():
+    """Return the document manifest (one entry per ingested file)."""
+    try:
+        from memory.document_ingestor import list_documents
+        return {"documents": list_documents()}
+    except Exception as e:
+        logger.error(f"Document list error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/documents/{doc_id}")
+async def delete_document_endpoint(doc_id: str):
+    """Drop all chunks + manifest entry for a previously-uploaded document."""
+    try:
+        from memory.document_ingestor import delete_document, get_document
+        meta = get_document(doc_id)
+        n = delete_document(doc_id)
+        # Best-effort remove the persisted file too.
+        if meta and meta.get("source") and os.path.exists(meta["source"]):
+            try:
+                os.remove(meta["source"])
+            except Exception:
+                pass
+        return {"doc_id": doc_id, "chunks_removed": n}
+    except Exception as e:
+        logger.error(f"Document delete error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/memory/rebuild-index")
+async def rebuild_memory_index():
+    """Backfill the vector index with all projects + tasks.
+
+    Useful when upgrading from a pre-RAG snapshot, or after restoring from
+    backup. Conversations are auto-indexed on each turn so they don't need
+    rebuilding; documents have their own upload flow.
+    """
+    try:
+        if not memory_store or not project_store:
+            raise HTTPException(status_code=503, detail="Memory not initialized")
+        projects = project_store.list(include_archived=True)
+        n = 0
+        for proj in projects:
+            try:
+                memory_store.index_project(proj)
+                n += 1
+            except Exception as e:
+                logger.warning(f"Re-index of project {proj.get('id')} failed: {e}")
+        return {"projects_indexed": n, "documents_skipped": "use /documents/upload to (re)ingest"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Rebuild index error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1558,6 +1750,36 @@ async def set_active_project(request: ProjectActivateRequest):
 
 # ---------- Phase D: MongoDB sync + Sessions sidebar ----------
 
+@app.get("/workspace")
+async def workspace_snapshot(
+    include_clipboard: bool = True,
+    include_processes: bool = True,
+    include_windows: bool = True,
+):
+    """Return a snapshot of the user's current desktop — active window, open
+    windows, clipboard, running apps.
+
+    READ-ONLY. Nothing here mutates the user's machine. This is the data layer
+    behind the workspace_query / read_clipboard macros, and a hook for future
+    "continue my project" type flows. Returns gracefully on Linux (Render)
+    where pygetwindow isn't available.
+    """
+    try:
+        from automation.workspace import get_workspace_snapshot, format_snapshot_markdown
+    except Exception as e:
+        return {"available": False, "reason": str(e)}
+    snap = get_workspace_snapshot(
+        include_clipboard=include_clipboard,
+        include_processes=include_processes,
+        include_windows=include_windows,
+    )
+    return {
+        "available": snap.platform_supported,
+        "markdown": format_snapshot_markdown(snap, include_clipboard=include_clipboard),
+        "snapshot": snap.to_dict(),
+    }
+
+
 @app.get("/mongo/status")
 async def mongo_status():
     """Return cloud-sync state for the topbar pill and the settings UI."""
@@ -1657,6 +1879,30 @@ async def resume_session(session_id: str):
         "rolling_summary": conversation_memory.get_running_summary(),
         "title": conversation_memory.session_title,
     }
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Hard-delete one chat session from Mongo.
+
+    Refuses to delete the active session — the UI should rotate to a new
+    session first (POST /sessions/new) before deleting the previously-active
+    one. This keeps Hunt's in-memory pointer consistent with what's on disk.
+    """
+    if not conversation_memory:
+        raise HTTPException(status_code=503, detail="Conversation memory not initialized")
+    if session_id == conversation_memory.session_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete the active session. Start a new chat first."
+        )
+    m = mongo_sync_singleton()
+    if not m or not m.available:
+        raise HTTPException(status_code=503, detail="MongoDB sync not available — past chats live only in Mongo")
+    removed = m.delete_session(session_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"status": "deleted", "session_id": session_id}
 
 
 @app.post("/sessions/new")
@@ -1790,11 +2036,19 @@ def get_status():  # sync: get_available_models() hits Ollama (blocking); UI pol
 
 @app.get("/")
 async def root():
-    """Serve the Jarvis web interface"""
-    index_path = os.path.join(UI_DIR, "index.html")
-    if os.path.exists(index_path):
-        return FileResponse(index_path)
+    """Serve the Hunt v2 dashboard (default UI).
 
+    v2 is now the primary UI at "/". The original UI lives at "/v1" for
+    anyone who still wants the dense control-panel layout.
+    """
+    v2_path = os.path.join(UI_DIR, "v2", "index.html")
+    if os.path.exists(v2_path):
+        return FileResponse(v2_path)
+    # Fallback: if v2 is missing for some reason, serve the legacy UI so
+    # the deployment isn't a blank 404.
+    legacy_path = os.path.join(UI_DIR, "index.html")
+    if os.path.exists(legacy_path):
+        return FileResponse(legacy_path)
     return {
         "message": "Welcome to Hunt - Your Personal AI Assistant",
         "version": settings.APP_VERSION,
@@ -1803,13 +2057,20 @@ async def root():
     }
 
 
+@app.get("/v1")
+async def root_v1():
+    """Serve the legacy (v1) UI — the original cream/terracotta dashboard."""
+    legacy_path = os.path.join(UI_DIR, "index.html")
+    if os.path.exists(legacy_path):
+        return FileResponse(legacy_path)
+    raise HTTPException(status_code=404, detail="legacy UI not found")
+
+
 @app.get("/v2")
-async def root_v2():
-    """Serve the v2 dashboard UI (side-by-side with the legacy UI)."""
-    v2_path = os.path.join(UI_DIR, "v2", "index.html")
-    if os.path.exists(v2_path):
-        return FileResponse(v2_path)
-    raise HTTPException(status_code=404, detail="v2 UI not found")
+async def root_v2_alias():
+    """Back-compat alias — /v2 still works for anyone with the URL bookmarked.
+    Just serves the same file "/" serves."""
+    return await root()
 
 
 if __name__ == "__main__":

@@ -120,6 +120,26 @@ class ProjectStore:
         except Exception as e:
             logger.warning(f"Mongo project mirror failed (non-fatal): {e}")
 
+    def _index_in_memory_store(self, proj: Dict) -> None:
+        """Mirror this project into the vector + BM25 memory so retrieval
+        across types ("Continue my travel project") finds it. Best-effort,
+        non-fatal — if Chroma isn't initialised yet (early startup) we just
+        log and move on; the next save will index again."""
+        try:
+            from . import memory_store as _ms
+            store = _ms.get_memory_store()
+            store.index_project(proj)
+        except Exception as e:
+            logger.debug(f"Project index skipped (non-fatal): {e}")
+
+    def _drop_from_memory_store(self, project_id: str) -> None:
+        try:
+            from . import memory_store as _ms
+            store = _ms.get_memory_store()
+            store.remove_project_index(project_id)
+        except Exception as e:
+            logger.debug(f"Project de-index skipped (non-fatal): {e}")
+
     @staticmethod
     def _do_mongo_upsert(m, pid: str, proj: Dict) -> None:
         """Background-thread worker: actually writes the project doc."""
@@ -188,6 +208,7 @@ class ProjectStore:
             proj["status"] = DEFAULT_STATUS
         self._projects[pid] = proj
         self._save()
+        self._index_in_memory_store(proj)
         return proj
 
     def patch(self, project_id: str, **fields) -> Optional[Dict]:
@@ -215,6 +236,7 @@ class ProjectStore:
         if changed:
             proj["updated_at"] = datetime.now().isoformat(timespec="seconds")
             self._save()
+            self._index_in_memory_store(proj)
         return proj
 
     def delete(self, project_id: str) -> bool:
@@ -222,6 +244,7 @@ class ProjectStore:
             return False
         del self._projects[project_id]
         self._save()
+        self._drop_from_memory_store(project_id)
         return True
 
     # ---- tasks ----
@@ -242,6 +265,7 @@ class ProjectStore:
         proj["open_tasks"].append(task)
         proj["updated_at"] = task["created_at"]
         self._save()
+        self._index_in_memory_store(proj)
         return task
 
     def patch_task(self, project_id: str, task_id: str, *,
@@ -259,6 +283,7 @@ class ProjectStore:
                 task["done"] = bool(done)
             proj["updated_at"] = datetime.now().isoformat(timespec="seconds")
             self._save()
+            self._index_in_memory_store(proj)
             return task
         return None
 
@@ -272,6 +297,7 @@ class ProjectStore:
             return False
         proj["updated_at"] = datetime.now().isoformat(timespec="seconds")
         self._save()
+        self._index_in_memory_store(proj)
         return True
 
     # ---- session links ----

@@ -306,6 +306,46 @@
     currentAbort = null;
   }
 
+  // Phrases that trigger Hunt's read_clipboard macro. We pre-detect them so
+  // we can fetch the browser clipboard ahead of POSTing — required when Hunt
+  // is running inside a Linux Docker container that can't see the host's
+  // (Windows) clipboard. The list mirrors the patterns in
+  // brain/context_manager.py so client and server agree.
+  const CLIPBOARD_PHRASES = [
+    "what's in my clipboard", "whats in my clipboard",
+    "read my clipboard", "read clipboard",
+    "what's on my clipboard", "whats on my clipboard",
+    "show me my clipboard", "show my clipboard",
+    "clipboard contents",
+    "what did i copy",
+  ];
+  function looksLikeClipboardQuery(text) {
+    const t = (text || "").toLowerCase();
+    return CLIPBOARD_PHRASES.some(p => t.includes(p));
+  }
+  async function readBrowserClipboard() {
+    // navigator.clipboard.readText is async and requires:
+    //  - a secure context (https or localhost — we're on localhost ✓)
+    //  - the user to have interacted with the page recently (the Enter key
+    //    or send click counts ✓)
+    //  - the user to grant the one-time permission Chrome prompts for
+    // We swallow errors — if the user denies or the API is missing, the
+    // backend macro just falls back to "clipboard is empty".
+    if (!navigator.clipboard || !navigator.clipboard.readText) {
+      console.warn("[clipboard] navigator.clipboard.readText unavailable");
+      return null;
+    }
+    try {
+      const text = await navigator.clipboard.readText();
+      const preview = (text || "").slice(0, 80).replace(/\s+/g, " ");
+      console.log(`[clipboard] read ${text.length} chars: "${preview}${text.length > 80 ? "…" : ""}"`);
+      return typeof text === "string" ? text : null;
+    } catch (e) {
+      console.warn("[clipboard] readText threw:", e && e.name, e && e.message);
+      return null;
+    }
+  }
+
   async function sendMessage(text) {
     if (busy) return;
     const v = (text || $("#input").value).trim();
@@ -320,6 +360,14 @@
     const aiText = makeCard("hunt", '<span class="cursor"></span>');
     let buffer = "";
     let firstToken = false;
+
+    // Pre-flight: if the user asked about clipboard, try to read it via the
+    // browser API so it works inside Docker. The fetch happens BEFORE we
+    // POST — the result is sent as `client_clipboard` in the request body.
+    let clientClipboard = null;
+    if (looksLikeClipboardQuery(v)) {
+      clientClipboard = await readBrowserClipboard();
+    }
 
     const ctrl = new AbortController();
     currentAbort = ctrl;
@@ -343,6 +391,9 @@
           use_live_search: !!prefs.liveSearch,
           voice_mode: false,
           response_length: prefs.replyLength,
+          // Only sent when the browser successfully read the clipboard —
+          // backend ignores null / missing.
+          ...(clientClipboard != null ? { client_clipboard: clientClipboard } : {}),
         }),
       });
       if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
@@ -576,15 +627,11 @@
           toast("Couldn't hear anything (" + reason + ")" + hint, "err");
           setMode("idle"); return;
         }
-        // Fill the input and focus so the user can review/edit before sending.
-        // Press Enter to send, or just click the orange arrow.
-        const inputEl = $("#input");
-        inputEl.value = text;
-        inputEl.focus();
-        // Select the text so they can immediately retype if Whisper mis-heard.
-        try { inputEl.setSelectionRange(0, text.length); } catch {}
-        setMode("idle", "Heard you — hit Enter to send, or edit first");
-        toast("Heard: “" + (text.length > 60 ? text.slice(0, 60) + "…" : text) + "”", "ok");
+        // Auto-send the transcript — no review step. The user wanted a
+        // single-action voice flow: tap mic, speak, tap mic again, Hunt
+        // replies. If Whisper mis-heard, they can hit Esc to cancel the
+        // in-flight chat (handled in the keydown listener above).
+        sendMessage(text);
       } catch (e) {
         toast("Transcription failed: " + e.message, "err");
         setMode("idle");
@@ -640,14 +687,184 @@
   }
   $("#gear").onclick = () => openDrawer(true);
   $("#closeDrawer").onclick = () => openDrawer(false);
-  $("#scrim").onclick = () => openDrawer(false);
+  $("#scrim").onclick = () => { openDrawer(false); openSessions(false); };
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    // Priority: close drawer if open, else cancel chat if in flight, else stop TTS.
+    // Priority: close any drawer if open, else cancel chat if in flight, else stop TTS.
     if ($("#drawer").classList.contains("open")) { openDrawer(false); return; }
+    if ($("#sessionsDrawer").classList.contains("open")) { openSessions(false); return; }
     if (currentAbort) { cancelChat("user_cancel"); return; }
     try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch {}
   });
+
+  // ---------------- SESSIONS DRAWER ----------------
+  // Lists past chats and lets the user resume one or start a new chat. Backed
+  // by /sessions (list), /sessions/{id}/resume (load), /sessions/new (rotate).
+  function openSessions(o) {
+    $("#sessionsDrawer").classList.toggle("open", o);
+    $("#scrim").classList.toggle("open", o);
+    if (o) loadSessions();
+  }
+  $("#sessionsBtn").onclick = () => openSessions(true);
+  $("#closeSessions").onclick = () => openSessions(false);
+
+  async function loadSessions() {
+    const host = $("#sessionsList");
+    host.innerHTML = '<div class="sessions-empty">Loading…</div>';
+    try {
+      const res = await fetch("/sessions?limit=50");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      renderSessions(data.sessions || [], data.available);
+    } catch (e) {
+      host.innerHTML = `<div class="sessions-empty">Couldn't load chats. ${escapeHtml(String(e.message || e))}</div>`;
+    }
+  }
+
+  function renderSessions(items, mongoAvailable) {
+    const host = $("#sessionsList");
+    if (!items.length) {
+      host.innerHTML = '<div class="sessions-empty">No chats yet — start one below.</div>';
+      return;
+    }
+    host.innerHTML = "";
+    for (const s of items) {
+      const row = document.createElement("div");
+      row.className = "session-row" + (s.is_current ? " current" : "");
+      const title = s.title || "Untitled chat";
+      const when = formatSessionDate(s.started_at || s.saved_at);
+      const turns = (s.verbatim_count != null) ? `${s.verbatim_count} turns` : "";
+      // Trash button is hidden for the current row (CSS) — can't delete the
+      // active chat without rotating to a new one first.
+      const delBtn = s.is_current ? "" : `
+        <button class="del" type="button" aria-label="Delete chat" title="Delete chat">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"/>
+            <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/>
+            <path d="M10 11v6M14 11v6"/>
+            <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+          </svg>
+        </button>`;
+      row.innerHTML = `
+        ${delBtn}
+        <div class="title">${escapeHtml(title)}</div>
+        <div class="meta">
+          ${s.is_current ? '<span class="dot" title="Current chat"></span>' : ""}
+          <span>${escapeHtml(when)}</span>
+          ${turns ? `<span>·</span><span>${turns}</span>` : ""}
+        </div>`;
+      row.onclick = (e) => {
+        // Don't resume when the user clicked the trash button.
+        if (e.target.closest(".del")) return;
+        resumeSession(s._id, s.is_current);
+      };
+      const delEl = row.querySelector(".del");
+      if (delEl) {
+        delEl.onclick = (e) => {
+          e.stopPropagation();
+          deleteSession(s._id, title);
+        };
+      }
+      host.appendChild(row);
+    }
+    if (!mongoAvailable) {
+      const note = document.createElement("div");
+      note.className = "sessions-empty";
+      note.textContent = "Mongo sync is off — only the current chat is shown.";
+      host.appendChild(note);
+    }
+  }
+
+  function formatSessionDate(iso) {
+    if (!iso) return "—";
+    try {
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      const now = new Date();
+      const sameDay = d.toDateString() === now.toDateString();
+      const opts = sameDay
+        ? { hour: "numeric", minute: "2-digit" }
+        : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+      return d.toLocaleString(undefined, opts);
+    } catch { return iso; }
+  }
+
+  async function resumeSession(sessionId, isCurrent) {
+    if (!sessionId) return;
+    if (isCurrent) { openSessions(false); return; }
+    try {
+      const res = await fetch(`/sessions/${encodeURIComponent(sessionId)}/resume`, { method: "POST" });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || ("HTTP " + res.status));
+      }
+      const data = await res.json();
+      replaySessionIntoFeed(data.verbatim || []);
+      openSessions(false);
+      toast(`Resumed chat: ${data.title || "Untitled"}`);
+    } catch (e) {
+      toast("Couldn't resume chat: " + (e.message || e), "err");
+    }
+  }
+
+  function replaySessionIntoFeed(verbatim) {
+    // Clear the feed and re-mount the verbatim turns as static cards. This
+    // does NOT re-stream — we're just showing what's already been said.
+    feed.innerHTML = "";
+    for (const turn of verbatim) {
+      const u = (turn.user || "").trim();
+      const a = (turn.assistant || "").trim();
+      if (u) makeCard("user", escapeHtml(u));
+      if (a) {
+        const aiText = makeCard("hunt", "");
+        aiText.innerHTML = renderMarkdownish(a);
+      }
+    }
+    setMode("idle");
+  }
+
+  async function deleteSession(sessionId, title) {
+    if (!sessionId) return;
+    const label = (title || "this chat").slice(0, 60);
+    if (!confirm(`Delete "${label}"? This can't be undone.`)) return;
+    try {
+      const res = await fetch(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || ("HTTP " + res.status));
+      }
+      toast("Chat deleted");
+      loadSessions();  // refresh the list
+    } catch (e) {
+      toast("Couldn't delete: " + (e.message || e), "err");
+    }
+  }
+
+  async function newChat() {
+    try {
+      const res = await fetch("/sessions/new", { method: "POST" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      feed.innerHTML = "";
+      setMode("idle");
+      openSessions(false);
+      toast("Started a fresh chat");
+    } catch (e) {
+      toast("Couldn't start a new chat: " + (e.message || e), "err");
+    }
+  }
+  $("#newChatBtn").onclick = newChat;
+  $("#newChatInDrawer").onclick = newChat;
+
+  // Light markdown for replayed assistant turns. The live stream uses the
+  // existing renderer; for replay we just want code blocks and line breaks
+  // to look right — nothing fancy.
+  function renderMarkdownish(text) {
+    const esc = escapeHtml(text);
+    // Triple-backtick code blocks → <pre><code>
+    const withCode = esc.replace(/```([\s\S]*?)```/g, (_, body) =>
+      `<pre class="code-block"><code>${body}</code></pre>`);
+    return withCode.replace(/\n/g, "<br>");
+  }
 
   // ---- Appearance ----
   function syncSeg(group, value, attr) {

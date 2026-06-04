@@ -209,6 +209,24 @@ class MongoSync:
             logger.warning(f"get_session failed: {e}")
             return None
 
+    def delete_session(self, session_id: str) -> bool:
+        """Hard-delete one session document. Returns True if a row was removed.
+
+        Synchronous (no queue) — deletes are user-initiated and the caller
+        wants to know the outcome before responding to the UI.
+        """
+        if not self.available:
+            return False
+        try:
+            result = self._db.sessions.delete_one({"_id": session_id})
+            removed = bool(result.deleted_count)
+            if removed:
+                logger.info(f"Deleted Mongo session {session_id}")
+            return removed
+        except Exception as e:
+            logger.warning(f"delete_session failed: {e}")
+            return False
+
     # ---- helpers ----
 
     @staticmethod

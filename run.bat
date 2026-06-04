@@ -6,10 +6,10 @@ title Hunt server (port 8001)
 echo Starting Hunt on http://127.0.0.1:8001 ...
 echo Press Ctrl+C to stop.
 echo.
-REM --loop asyncio + --http h11 avoid a Windows/Python 3.13 bug in uvicorn's
-REM Proactor event loop where the server hangs after a client connection
-REM reset. No --reload because it kills in-flight requests on every file save.
-.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --loop asyncio --http h11
+REM run_local.py forces WindowsSelectorEventLoopPolicy before importing
+REM uvicorn — this is the actual root-cause fix for the Windows hang
+REM after the first browser disconnect. See run_local.py docstring.
+.venv\Scripts\python.exe run_local.py
 echo.
 echo Server stopped. Press any key to close.
 pause >nul
