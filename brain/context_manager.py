@@ -192,6 +192,24 @@ class Reasoning:
                 "long answer", "detailed explanation",
             ],
 
+            # Recall / memory-grounded asks. Routed to the `brain` role so
+            # the LLM uses the conversational persona (the `coder` persona
+            # would otherwise hijack any query containing "code", treating
+            # "tell me about the X code we wrote" as a fresh write-code
+            # request). Patterns are high-precision phrases — not single
+            # words — so we don't over-fire on casual prose. Ordered BEFORE
+            # code_help so it wins as primary_intent on shared matches.
+            "recall": [
+                "tell me about", "remind me",
+                "what did we", "what did i",
+                "what was the",
+                "find my", "find the",
+                "show me my", "show me the",
+                "look up",
+                "recall ",
+                "list my", "list our", "list the",
+            ],
+
             # Code / dev tasks. Includes language names, framework names, and
             # common dev verbs so requests like "Write a Flask API" or
             # "implement a SQL query" route to the coder role.
@@ -245,6 +263,7 @@ class Reasoning:
             "open_app": "desktop_automation",
             "close_app": "desktop_automation",
             "search": "research_agent",
+            "recall": "research_agent",
             "file_operation": "file_manager",
             "code_help": "coding_agent",
             "conversation": "chat_engine",

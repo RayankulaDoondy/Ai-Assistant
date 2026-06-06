@@ -50,6 +50,46 @@ _LIGHT_INTENTS = {"small_talk", "conversation"}
 _HEAVY_INTENTS = {"code_help", "reasoning"}
 
 
+# Phrases that strongly signal the user wants RECALL from their own data
+# (chats, projects, tasks, documents). When ANY of these appears, research
+# mode is worth its 2-LLM-call cost. When NONE appears, the tool would just
+# search and find nothing relevant — so we skip it entirely.
+_RECALL_SIGNALS = (
+    # Possessives — they're asking about THEIR stuff
+    " my ", " our ", " we ", "i've", "i did", "i wrote", "i made", "i built",
+    "i created", "i uploaded", "i asked", "i told",
+    # Time references — implies past activity
+    "earlier", "before", "previously", "yesterday", "last week", "last time",
+    "last session", "last chat", "this morning", "today's", "this week",
+    # Recall verbs
+    "find ", "search ", "show me", "tell me about", "remind me",
+    "what was", "what were", "what did", "what do i", "what do we",
+    "where is the", "where are my", "where did",
+    "look up", "look for", "recall",
+    "list my", "list our", "list the", "list all",
+    # Continuation
+    "continue", "pick up where", "resume",
+)
+
+
+def is_recall_query(message: Optional[str]) -> bool:
+    """Return True if the message looks like the user wants to RECALL
+    information from their own data — projects, past chats, uploaded
+    files. Cheap heuristic: pre-stage gate that decides whether
+    research-mode tool calls are even worth attempting.
+
+    Trivial queries ("what's 7x8", "hi", "translate to French") return
+    False so they bypass the tool flow.
+    """
+    if not message:
+        return False
+    m = " " + message.lower().strip() + " "
+    for sig in _RECALL_SIGNALS:
+        if sig in m:
+            return True
+    return False
+
+
 def classify_depth(intent: Optional[str], message: Optional[str]) -> str:
     """Return one of `light` / `medium` / `heavy` based on how much
     structure the response should carry.

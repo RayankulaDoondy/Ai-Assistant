@@ -325,10 +325,12 @@
   // ---------------- CHAT STREAMING ----------------
   // currentAbort lets the user (or a timeout) cancel an in-flight chat.
   let currentAbort = null;
-  // Watchdog: if no token arrives in WATCHDOG_MS, treat the request as dead.
+  // Watchdog: if no event arrives in WATCHDOG_MS, treat the request as dead.
   // Server reloads or network drops would otherwise leave the UI stuck in
-  // "Thinking" forever.
+  // "Thinking" forever. Research mode chats run TWO LLM calls (planner +
+  // final stream) so the watchdog needs to be longer when use_tools is on.
   const WATCHDOG_MS = 45000;
+  const WATCHDOG_MS_TOOLS = 90000;
 
   function cancelChat(reason) {
     if (!currentAbort) return;
@@ -406,13 +408,16 @@
 
     const ctrl = new AbortController();
     currentAbort = ctrl;
-    // Watchdog timer — reset every time we receive a token.
+    // Watchdog timer — reset every time we receive a server event. Research
+    // mode runs an extra LLM call up front (planner) before the streamed
+    // answer, so we use a longer timeout when it's on.
+    const watchdogMs = prefs.researchMode ? WATCHDOG_MS_TOOLS : WATCHDOG_MS;
     let watchdog = setTimeout(() => {
       try { ctrl.abort("watchdog"); } catch {}
-    }, WATCHDOG_MS);
+    }, watchdogMs);
     const kickWatchdog = () => {
       clearTimeout(watchdog);
-      watchdog = setTimeout(() => { try { ctrl.abort("watchdog"); } catch {} }, WATCHDOG_MS);
+      watchdog = setTimeout(() => { try { ctrl.abort("watchdog"); } catch {} }, watchdogMs);
     };
 
     try {
@@ -512,7 +517,7 @@
       const aborted = (e && (e.name === "AbortError" || ctrl.signal.aborted));
       const reason = aborted ? (ctrl.signal.reason || "aborted") : (e && e.message) || "unknown";
       if (aborted && reason === "watchdog") {
-        aiText.innerHTML = `<span style="color:#f87171">No reply within ${Math.round(WATCHDOG_MS/1000)}s. The server may be restarting or the model is slow. Try again.</span>`;
+        aiText.innerHTML = `<span style="color:#f87171">No reply within ${Math.round(watchdogMs/1000)}s. The server may be restarting or the model is slow. Try again.</span>`;
         toast("Hunt didn't reply in time. Server may be restarting.", "err");
       } else if (aborted) {
         aiText.innerHTML = `<span style="color:var(--faint)">— stopped —</span>`;
@@ -606,7 +611,11 @@
       row.type = "button";
       row.className = "cite-row";
       const kind = c.type || "memory";
+      // Prefer the server-computed smart title (built from doc/project name
+      // or the user's first question in the snippet). Fall back to old
+      // heuristics for resilience against older server versions.
       const title = (
+        c.title ||
         c.doc_title ||
         c.project_name ||
         (kind === "task" && c.snippet ? c.snippet.split("\n")[0].slice(0, 60) : "") ||

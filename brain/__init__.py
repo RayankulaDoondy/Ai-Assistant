@@ -16,6 +16,7 @@ from .response_composer import (
     classify_depth,
     build_contract,
     extract_voice_and_display,
+    is_recall_query,
 )
 
 __all__ = [
@@ -41,4 +42,5 @@ __all__ = [
     "classify_depth",
     "build_contract",
     "extract_voice_and_display",
+    "is_recall_query",
 ]

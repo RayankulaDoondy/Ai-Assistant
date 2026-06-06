@@ -35,6 +35,11 @@ INTENT_TO_ROLE: Dict[str, str] = {
     "search":         "fast",
     "code_help":      "coder",
     "reasoning":      "brain",
+    # Memory-grounded recall ("tell me about the X we wrote", "remind me
+    # of Y") — uses the conversational brain persona, not the coder persona,
+    # so a query about previously-written code is answered as a synthesis
+    # of past context rather than a fresh "write code now" request.
+    "recall":         "brain",
     "small_talk":     "fast",
     "conversation":   "fast",
     "task":           "fast",

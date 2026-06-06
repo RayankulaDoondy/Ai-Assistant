@@ -740,8 +740,18 @@ def chat_stream(request: ChatRequest):  # sync: preamble + sync stream generator
         # planner. It yields the same shape of events plus two new ones
         # (tool_call, tool_result) that we forward to the client so the UI
         # can show a "Searching memory..." indicator + citation cards.
+        #
+        # Polish 1.5 gate: even with research mode ON, trivial queries
+        # (greetings, pure computation, generic knowledge questions like
+        # "what is bubble sort") skip the tool flow. Saves a wasted LLM
+        # call per turn AND avoids the planner's "I must call a tool"
+        # behavior firing on questions where no retrieval makes sense.
+        # The user opted into research mode to ground recall answers, not
+        # to burn a second call on arithmetic.
+        from brain import is_recall_query
         citations: List[Dict[str, Any]] = []
-        if request.use_tools:
+        use_tools_effective = request.use_tools and is_recall_query(request.message)
+        if use_tools_effective:
             stream_iter = llm_engine.chat_with_tools_stream(
                 request.message,
                 effective_context,

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -84,8 +85,8 @@ RETRIEVE_MEMORY_SCHEMA: Dict[str, Any] = {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max snippets to return. Default 5, cap 10.",
-                    "default": 5,
+                    "description": "Max snippets to return. Default 3, cap 10. Prefer 3 unless the user asks for an exhaustive list.",
+                    "default": 3,
                     "minimum": 1,
                     "maximum": 10,
                 },
@@ -108,9 +109,78 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
 # ====================================================================== #
 
 
+def _normalize_for_dedupe(text: str) -> str:
+    """Build a dedupe key from a snippet.
+
+    For conversation snippets ("User: ...\\nAssistant: ..."), strip the user
+    question and dedupe on the ASSISTANT response only. Otherwise dozens
+    of "different phrasing, same answer" snippets all look distinct (the
+    first 200 chars are dominated by the differing user question, not the
+    common answer). The semantic value the user cares about is the
+    assistant's content.
+
+    For non-conversation snippets, falls back to normalizing the whole text.
+    Whitespace is collapsed and case lowered, first 200 chars become the key.
+    """
+    import re as _re
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    # Conversation pattern: "User: ...\nAssistant: ...". Take just the
+    # assistant portion so re-asks of the same question collapse together.
+    m = _re.match(r"^user:\s*[\s\S]*?\nassistant:\s*([\s\S]*)$", raw, _re.IGNORECASE)
+    body = m.group(1) if m else raw
+    return _re.sub(r"\s+", " ", body.lower()).strip()[:200]
+
+
+def _smart_title(snippet: str, meta: Dict[str, Any]) -> str:
+    """Build a human-useful title for a citation card.
+
+    Priority order:
+      1. doc_title / project_name (when present)
+      2. First USER turn from a conversation snippet (their actual question)
+      3. First line of the snippet, trimmed
+
+    Truncates to 70 chars with ellipsis. Falls back to the memory type
+    name if nothing else works.
+    """
+    doc_title = meta.get("doc_title")
+    if doc_title:
+        return str(doc_title)[:70]
+    project_name = meta.get("project_name")
+    if project_name:
+        return str(project_name)[:70]
+
+    text = (snippet or "").strip()
+    if not text:
+        return (meta.get("type") or "memory").title()
+
+    # Conversation snippets start with "User: <question>\nAssistant: ..." —
+    # pull the user's question, that's what the user remembers asking.
+    if text.startswith("User:"):
+        first_line = text.split("\n", 1)[0]
+        user_q = first_line[len("User:"):].strip()
+        if user_q:
+            return user_q[:70] + ("…" if len(user_q) > 70 else "")
+
+    # Otherwise first non-empty line.
+    for line in text.split("\n"):
+        line = line.strip()
+        if line:
+            return line[:70] + ("…" if len(line) > 70 else "")
+    return (meta.get("type") or "memory").title()
+
+
 def _execute_retrieve_memory(args: Dict[str, Any]) -> Dict[str, Any]:
     """Run a memory retrieval. Imports the store lazily so this module is
-    cheap to import (the LLM engine pulls it on every request)."""
+    cheap to import (the LLM engine pulls it on every request).
+
+    Post-processing applied after the raw retrieve:
+      - Dedupe near-identical snippets (the user's data has many "write
+        bubble sort" attempts — we don't want 5 cards for the same code).
+      - Build a smart title per citation (snippet's first user turn or
+        doc/project name beats a generic "Past chat" badge).
+    """
     query = str(args.get("query") or "").strip()
     if not query:
         return {"error": "empty query", "results": [], "count": 0}
@@ -119,7 +189,6 @@ def _execute_retrieve_memory(args: Dict[str, Any]) -> Dict[str, Any]:
     if types and not isinstance(types, list):
         types = None
     if types:
-        # Defensive: cap to the four valid types.
         valid = {"conversation", "project", "task", "document"}
         types = [t for t in types if t in valid]
         if not types:
@@ -139,27 +208,53 @@ def _execute_retrieve_memory(args: Dict[str, Any]) -> Dict[str, Any]:
 
     store = get_memory_store()
     try:
-        hits = store.retrieve(query=query, limit=limit, types=types)
+        # Over-fetch so dedupe has room to trim back to `limit`.
+        hits = store.retrieve(query=query, limit=limit * 2, types=types)
     except Exception as e:
         logger.warning(f"retrieve_memory call failed: {e}")
         return {"error": str(e), "results": [], "count": 0}
 
-    # Trim each snippet so the tool result the LLM sees stays compact.
-    # The full content is preserved server-side for citation rendering.
-    compact = []
+    # Self-reference guard: ConversationMemory.add_exchange() writes the
+    # current turn into Chroma AFTER the reply finishes. A quick follow-up
+    # (within ~1-2 minutes) can otherwise retrieve the just-stored exchange
+    # as its own "source", creating an echo chamber. Skip anything younger
+    # than this cutoff. Fail-open: items with no timestamp are kept.
+    cutoff_iso = (datetime.now() - timedelta(seconds=120)).isoformat()
+
+    # Dedupe: skip anything whose normalized first-200-char prefix matches
+    # an already-kept snippet. Preserves rank order from retrieve().
+    seen_keys: set = set()
+    compact: List[Dict[str, Any]] = []
     for h in hits:
+        snippet = (h.get("content") or "")[:400]
+        key = _normalize_for_dedupe(snippet)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+
         meta = h.get("metadata") or {}
+
+        # Drop fresh self-reference candidates. ISO 8601 timestamps from
+        # the same datetime.now().isoformat() format sort lexicographically,
+        # so string comparison is sound and avoids parse failures.
+        ts = meta.get("timestamp")
+        if isinstance(ts, str) and ts and ts > cutoff_iso:
+            continue
+
         compact.append({
-            "snippet": (h.get("content") or "")[:400],
+            "snippet": snippet,
+            "title": _smart_title(snippet, meta),
             "type": meta.get("type") or "memory",
             "id": h.get("id"),
-            # Tiny per-type metadata that's useful for citations:
             "project_id": meta.get("project_id"),
             "project_name": meta.get("project_name"),
             "doc_id": meta.get("doc_id"),
             "doc_title": meta.get("doc_title"),
-            "timestamp": meta.get("timestamp"),
+            "timestamp": ts,
         })
+        if len(compact) >= limit:
+            break
+
     return {"query": query, "results": compact, "count": len(compact)}
 
 

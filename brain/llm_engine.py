@@ -684,11 +684,11 @@ class LLMEngine:
         if not candidates:
             candidates = [self.model_name]
 
-        # Tool use needs a model that supports the tools array. Walk the
-        # fallback chain in order — the first cloud provider with a key
-        # wins. Local Ollama is skipped (it doesn't speak this protocol).
-        plan_model = None
-        plan_provider = None
+        # Tool use needs a model that supports the tools array. Build the
+        # FULL list of usable (provider, model) pairs from the fallback
+        # chain so we can iterate through them on API errors (402 / 429 /
+        # 5xx). Local Ollama is skipped (it doesn't speak this protocol).
+        viable: List[Tuple[str, str]] = []
         for m in candidates:
             provider, real_model = self._provider_and_model(m)
             if provider in self.OPENAI_COMPAT_PROVIDERS:
@@ -696,10 +696,8 @@ class LLMEngine:
                     self._provider_request_config(provider)
                 except RuntimeError:
                     continue
-                plan_model = real_model
-                plan_provider = provider
-                break
-        if plan_provider is None:
+                viable.append((provider, real_model))
+        if not viable:
             yield "error", "Tool use needs an OpenAI-compatible provider with a configured key (OpenRouter / Groq / Gemini)."
             return
 
@@ -761,28 +759,60 @@ class LLMEngine:
         temp = self._resolve_temperature(temperature, self.temperature)
         tools = list_tools()
 
-        # ---- Planning call --------------------------------------------
+        # ---- Planning call (walks fallback chain on error) -----------
         # `tool_choice="required"` forces the LLM to call at least one tool.
         # With only retrieve_memory registered, that's equivalent to "always
         # search memory first". This is what research mode promises — the
-        # user toggled it ON precisely to demand grounded answers. Wasteful
-        # on trivial queries (a "what's 7×8" still triggers a search) but
-        # that's the contract of research mode being opt-in.
-        logger.info(f"Research planner: provider={plan_provider} model={plan_model} prompt='{prompt[:60]}'")
-        try:
-            plan = self._chat_openai_compat_with_tools(
-                plan_provider, plan_model, messages, tools,
-                num_predict=min(num_predict, 800),
-                temperature=temp,
-                tool_choice="required",
+        # user toggled it ON precisely to demand grounded answers.
+        #
+        # Iterate through viable providers: if OpenRouter returns 402
+        # (no credits) or 429 (rate limit), try Groq next, then Gemini, etc.
+        # The same pair that succeeds at planning is used for the final
+        # stream call below so we don't re-plan with a different model.
+        plan = None
+        plan_provider = None
+        plan_model = None
+        last_error: Optional[str] = None
+        for idx, (provider, model) in enumerate(viable):
+            logger.info(
+                f"Research planner: provider={provider} model={model} "
+                f"(candidate {idx+1}/{len(viable)}) prompt='{prompt[:60]}'"
             )
-        except Exception as e:
-            logger.warning(f"Tool-use planner failed ({e}); falling back to plain stream")
-            yield from self._stream_openai_compat(plan_provider, plan_model, messages, num_predict, temp)
+            try:
+                plan = self._chat_openai_compat_with_tools(
+                    provider, model, messages, tools,
+                    num_predict=min(num_predict, 800),
+                    temperature=temp,
+                    tool_choice="required",
+                )
+                plan_provider = provider
+                plan_model = model
+                break  # success
+            except Exception as e:
+                last_error = f"{provider}:{model} -> {e}"
+                logger.warning(
+                    f"Planner failed on {provider}:{model}: {e}; "
+                    f"trying next fallback"
+                )
+                continue
+
+        if plan is None:
+            # Every viable provider failed the planner call. Fall back to a
+            # plain (no-tools) stream so the user still gets SOME answer.
+            logger.warning(f"All planners failed; final-fallback to plain stream. Last error: {last_error}")
+            yield from self.generate_stream(
+                prompt, context, voice_mode=voice_mode, history=history,
+                response_length=response_length, temperature=temperature,
+                model_override=model_override, role=role,
+            )
             return
 
         tool_calls = plan.get("tool_calls") or []
-        logger.info(f"Research planner result: tool_calls={len(tool_calls)}, raw_content_len={len(plan.get('content') or '')}")
+        logger.info(
+            f"Research planner result on {plan_provider}:{plan_model}: "
+            f"tool_calls={len(tool_calls)}, "
+            f"raw_content_len={len(plan.get('content') or '')}"
+        )
 
         if tool_calls:
             messages.append({
@@ -820,9 +850,35 @@ class LLMEngine:
                 })
 
         # ---- Final streamed answer (with or without tool context) ----
-        yield from self._stream_openai_compat(
-            plan_provider, plan_model, messages, num_predict, temp,
+        # Try the planner-winning pair first. If it errors before the FIRST
+        # token (e.g. 402 on a separate billed call), walk the chain again.
+        # Once tokens start flowing we can't switch providers mid-stream.
+        stream_attempt_idx = next(
+            (i for i, (p, m) in enumerate(viable) if p == plan_provider and m == plan_model),
+            0,
         )
+        for idx in range(stream_attempt_idx, len(viable)):
+            provider, model = viable[idx]
+            try:
+                first_token_seen = False
+                for evt, payload in self._stream_openai_compat(
+                    provider, model, messages, num_predict, temp,
+                ):
+                    if evt == "token":
+                        first_token_seen = True
+                    yield evt, payload
+                return
+            except Exception as e:
+                if first_token_seen:
+                    # Mid-stream failure — can't recover, surface error.
+                    yield "error", f"Stream broke mid-reply on {provider}: {e}"
+                    return
+                logger.warning(
+                    f"Final stream failed on {provider}:{model} before any token: {e}; "
+                    f"trying next fallback"
+                )
+                continue
+        yield "error", f"All providers failed the final stream call. Last error: {last_error}"
 
     # Back-compat shims — the rest of the engine still imports these names.
     def _chat_openrouter(self, model, messages, num_predict, temperature):
