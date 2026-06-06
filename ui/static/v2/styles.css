@@ -517,6 +517,7 @@ button{cursor:pointer;border:none;background:none;color:inherit}
 }
 .cite-row .cite-kind--document{background:color-mix(in srgb, var(--bg2) 60%, #6aa3ff 18%);color:#6aa3ff}
 .cite-row .cite-kind--project{background:color-mix(in srgb, var(--bg2) 60%, #5fd6a8 18%);color:#5fd6a8}
+.cite-row .cite-kind--gmail{background:color-mix(in srgb, var(--bg2) 60%, #ea4335 22%);color:#ea4335}
 .cite-row .cite-kind--task{background:color-mix(in srgb, var(--bg2) 60%, #d68b5f 18%);color:#d68b5f}
 .cite-row .cite-title{flex:1;color:var(--text);font-weight:600;font-size:12.5px}
 .cite-row .cite-stamp{font-size:10.5px;color:var(--faint)}
@@ -528,4 +529,58 @@ button{cursor:pointer;border:none;background:none;color:inherit}
 .cite-row.open .cite-snippet{
   -webkit-line-clamp:initial;
   display:block;
+}
+
+/* ---------- Phase 3: Gmail integration card ---------- */
+.srow.integ-row{padding:0;border:none;display:block}
+.integ{
+  width:100%;padding:14px 14px;border-radius:12px;
+  background:var(--bg2);border:1px solid var(--border);
+  display:flex;flex-direction:column;gap:10px;
+}
+.integ-head{display:flex;align-items:center;gap:12px}
+.integ-icon{
+  width:36px;height:36px;border-radius:10px;
+  display:grid;place-items:center;flex:none;
+  background:linear-gradient(135deg,#ea4335,#fbbc04);
+  color:#fff;font-weight:800;font-size:18px;letter-spacing:.02em;
+}
+.integ-body{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.integ-name{color:var(--text);font-weight:700;font-size:14px}
+.integ-status{
+  font-size:11.5px;font-weight:600;letter-spacing:.04em;
+  padding:2px 0;
+}
+.integ-status--ok{color:#5fd6a8}
+.integ-status--warn{color:#f0b958}
+.integ-status--idle{color:var(--faint)}
+.integ-hint{font-size:12px;color:var(--muted);line-height:1.45}
+.integ-actions{display:flex;gap:8px;flex-wrap:wrap}
+.integ-btn{
+  padding:9px 14px;border-radius:10px;font-size:12.5px;font-weight:600;
+  border:none;cursor:pointer;transition:.15s;
+}
+.integ-btn--primary{
+  background:linear-gradient(135deg,var(--orange),var(--hi));
+  color:#0a0a0a;
+}
+.integ-btn--primary:hover:not(:disabled){filter:brightness(1.05)}
+.integ-btn--primary:disabled{opacity:.5;cursor:not-allowed}
+.integ-btn--ghost{
+  background:transparent;color:var(--muted);
+  border:1px solid var(--border2);
+}
+.integ-btn--ghost:hover:not(:disabled){color:var(--text);border-color:var(--text)}
+.integ-setup{
+  font-size:11.5px;color:var(--faint);
+  padding:10px 12px;border-radius:8px;
+  background:color-mix(in srgb, var(--bg2) 70%, #f0b958 6%);
+  border:1px dashed color-mix(in srgb, var(--border2) 60%, #f0b958 30%);
+}
+.integ-setup summary{cursor:pointer;font-weight:600;color:var(--muted);outline:none}
+.integ-setup summary:hover{color:var(--text)}
+.integ-setup p{margin:8px 0 0;line-height:1.5}
+.integ-setup code{
+  background:rgba(0,0,0,.4);padding:1px 5px;border-radius:4px;
+  font-family:ui-monospace,SFMono-Regular,monospace;font-size:11px;
 }

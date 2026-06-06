@@ -97,10 +97,106 @@ RETRIEVE_MEMORY_SCHEMA: Dict[str, Any] = {
 }
 
 
+GMAIL_SEARCH_SCHEMA: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "gmail_search",
+        "description": (
+            "Search the user's Gmail and return message metadata (subject, "
+            "from, date, snippet, message_id). Use whenever the user asks "
+            "about EMAIL: 'did I get a bank statement', 'find the email from "
+            "Amazon', 'check my inbox for X', 'what mail did I get from Y'. "
+            "The `query` parameter accepts Gmail's powerful native search "
+            "syntax — combine fields rather than typing free-form prose:\n"
+            "  from:bank@example.com  →  messages from a sender\n"
+            "  to:me  →  messages addressed to the user\n"
+            "  subject:invoice  →  subject contains a word\n"
+            "  has:attachment    →  only messages with attachments\n"
+            "  after:2024/05/01  →  on or after that date\n"
+            "  before:2024/06/01 →  before that date\n"
+            "  newer_than:30d / older_than:1y  →  relative time\n"
+            "  is:unread / is:starred / is:important\n"
+            "  label:bills      →  user-managed label\n"
+            "  in:inbox / in:spam / in:trash\n"
+            "Combine with spaces (AND) or `OR`. Wrap multi-word phrases in "
+            "quotes. Example for 'bank statement in May':\n"
+            "  (from:bank OR from:hdfc OR subject:statement) "
+            "after:2024/05/01 before:2024/06/01 has:attachment\n\n"
+            "If the user hasn't connected Gmail yet, the tool returns an "
+            "explicit 'gmail_not_connected' error — tell them to open the "
+            "settings drawer and click Connect Gmail. Do NOT make up email "
+            "contents when the search returns nothing or fails."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Gmail search syntax string. Combine field "
+                        "operators rather than writing prose."
+                    ),
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": (
+                        "How many messages to return. Default 10, cap 25. "
+                        "Use a smaller number when the user asks a "
+                        "specific question ('did I get X' → 5) and a "
+                        "larger one for sweeps ('all bank mail this year')."
+                    ),
+                    "default": 10,
+                    "minimum": 1,
+                    "maximum": 25,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
+GMAIL_READ_SCHEMA: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "gmail_read",
+        "description": (
+            "Fetch the full body and attachment manifest of ONE specific "
+            "Gmail message. Call this AFTER gmail_search when the user "
+            "asks about the contents of a specific email, or when the "
+            "search snippet wasn't enough to answer (e.g. 'what does the "
+            "statement say about my balance' → search → read the right "
+            "message). The `message_id` must come from a prior "
+            "gmail_search result — never invent one.\n\n"
+            "Returns subject, from, to, date, the plain-text body, and a "
+            "list of attachments (with filenames and ids — you can mention "
+            "them in your answer but Hunt cannot yet download arbitrary "
+            "attachments to the chat). If the user hasn't connected Gmail, "
+            "the tool returns 'gmail_not_connected'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": (
+                        "The Gmail message id from a previous "
+                        "gmail_search hit."
+                    ),
+                },
+            },
+            "required": ["message_id"],
+        },
+    },
+}
+
+
 # Registry of every schema the LLM is told about. Ordered roughly by how
 # often each tool is likely to be useful.
 TOOL_SCHEMAS: List[Dict[str, Any]] = [
     RETRIEVE_MEMORY_SCHEMA,
+    GMAIL_SEARCH_SCHEMA,
+    GMAIL_READ_SCHEMA,
 ]
 
 
@@ -258,8 +354,133 @@ def _execute_retrieve_memory(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"query": query, "results": compact, "count": len(compact)}
 
 
+# --------------------------------------------------------------------- #
+# Gmail tools — Phase 3
+# --------------------------------------------------------------------- #
+# Both `gmail_search` and `gmail_read` lean on integrations.gmail_client.
+# The wrapper handles OAuth load/refresh, so the executors stay tiny and
+# focused on shaping the result for the LLM + Hunt's citation rendering.
+
+def _execute_gmail_search(args: Dict[str, Any]) -> Dict[str, Any]:
+    """LLM-callable Gmail search. Translates GmailClient.search() results
+    into the same `{results: [...], count: N}` shape `retrieve_memory`
+    uses, so the citation-card pipeline in main.py picks them up without
+    a special case."""
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return {"error": "empty query", "results": [], "count": 0}
+
+    max_results = args.get("max_results", 10)
+    try:
+        max_results = max(1, min(25, int(max_results)))
+    except (TypeError, ValueError):
+        max_results = 10
+
+    try:
+        from integrations.gmail_client import GmailClient
+    except Exception as e:
+        logger.warning(f"gmail_search: import failed ({e})")
+        return {"error": f"gmail integration unavailable: {e}", "results": [], "count": 0}
+
+    client = GmailClient()
+    if not client.available():
+        # The LLM is instructed (via tool description) to surface this
+        # cleanly: "you need to connect Gmail — settings drawer".
+        return {
+            "error": "gmail_not_connected",
+            "message": client.error() or "Gmail not connected.",
+            "results": [],
+            "count": 0,
+        }
+
+    raw = client.search(query, max_results=max_results)
+    if raw.get("error"):
+        return {"error": raw["error"], "results": [], "count": 0}
+
+    # Reshape into the citation-friendly format. Snippet ≈ what the LLM
+    # sees + what the UI renders under the card. Title = subject line.
+    compact: List[Dict[str, Any]] = []
+    for m in raw.get("results") or []:
+        compact.append({
+            "snippet": (m.get("snippet") or "")[:400],
+            "title": m.get("subject") or "(no subject)",
+            "type": "gmail",
+            "id": m.get("id"),
+            "message_id": m.get("id"),
+            "thread_id": m.get("thread_id"),
+            "from": m.get("from") or "",
+            "to": m.get("to") or "",
+            "date": m.get("date") or "",
+            # Mirror conversation citations: a parseable timestamp helps
+            # the UI sort and the dedupe layer treat fresh hits sanely.
+            "timestamp": m.get("date") or None,
+            # Per-source metadata the citation rendering already understands
+            # is mostly project/document specific — Gmail has no analogue,
+            # so we leave those slots empty.
+            "project_id": None,
+            "project_name": None,
+            "doc_id": None,
+            "doc_title": None,
+        })
+
+    return {
+        "query": query,
+        "results": compact,
+        "count": len(compact),
+        "user_email": raw.get("user_email"),
+    }
+
+
+def _execute_gmail_read(args: Dict[str, Any]) -> Dict[str, Any]:
+    """LLM-callable Gmail read. Returns headers + plain body + attachment
+    manifest so the model can ground its answer. Body is truncated server-
+    side so we don't blow the model's context window on a giant newsletter."""
+    message_id = str(args.get("message_id") or "").strip()
+    if not message_id:
+        return {"error": "message_id is required"}
+
+    try:
+        from integrations.gmail_client import GmailClient
+    except Exception as e:
+        logger.warning(f"gmail_read: import failed ({e})")
+        return {"error": f"gmail integration unavailable: {e}"}
+
+    client = GmailClient()
+    if not client.available():
+        return {"error": "gmail_not_connected", "message": client.error() or "Gmail not connected."}
+
+    msg = client.get_message(message_id)
+    if msg.get("error"):
+        return {"error": msg["error"]}
+
+    # Cap the body so a giant marketing email doesn't dominate the model's
+    # context. The LLM can re-call gmail_read for a different message if
+    # it needs more from a different thread; truncating here trades a tiny
+    # bit of fidelity for predictable token cost.
+    body = msg.get("body") or ""
+    truncated = False
+    BODY_CAP = 6000
+    if len(body) > BODY_CAP:
+        body = body[:BODY_CAP]
+        truncated = True
+
+    return {
+        "message_id": msg.get("id"),
+        "thread_id": msg.get("thread_id"),
+        "subject": msg.get("subject"),
+        "from": msg.get("from"),
+        "to": msg.get("to"),
+        "date": msg.get("date"),
+        "body": body,
+        "body_truncated": truncated,
+        "attachments": msg.get("attachments") or [],
+    }
+
+
 TOOL_EXECUTORS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "retrieve_memory": _execute_retrieve_memory,
+    "gmail_search":    _execute_gmail_search,
+    "gmail_read":      _execute_gmail_read,
 }
 
 
@@ -312,4 +533,10 @@ def summarize_tool_call_for_ui(name: str, args: Dict[str, Any]) -> str:
         types = (args or {}).get("types") or []
         scope = "memory" if not types else " + ".join(types)
         return f"Searching {scope} for: {q[:60]}"
+    if name == "gmail_search":
+        q = (args or {}).get("query") or ""
+        return f"Searching Gmail for: {q[:80]}"
+    if name == "gmail_read":
+        mid = (args or {}).get("message_id") or ""
+        return f"Reading Gmail message {mid[:12]}…"
     return f"Running {name}…"

@@ -42,6 +42,7 @@ services:
       - ./brain:/app/brain
       - ./memory:/app/memory
       - ./automation:/app/automation
+      - ./integrations:/app/integrations
       - ./voice:/app/voice
       - ./config:/app/config
       - ./ui:/app/ui
@@ -52,6 +53,11 @@ services:
       # Use a named volume so it survives `docker compose down -v` (until
       # you explicitly remove it).
       - hunt-data:/data
+      # Phase 3 — Gmail OAuth credentials live on the host so editing /
+      # rotating them is just a normal file operation. The bind mount
+      # overlays JUST /data/google on top of the named volume; the rest
+      # of /data (chroma, sessions, etc.) stays in the named volume.
+      - ./data/google:/data/google
     restart: unless-stopped
 
 volumes:

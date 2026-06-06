@@ -7,8 +7,8 @@ import re
 import json as _json
 
 import uuid
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -2001,6 +2001,117 @@ async def new_session():
         "session_id": conversation_memory.session_id,
         "title": conversation_memory.session_title,
     }
+
+
+# =================================================================== #
+# Phase 3 — Gmail OAuth endpoints
+# =================================================================== #
+# Flow:
+#   /auth/google/start    → 302 to Google's consent screen
+#   Google redirects back → /auth/google/callback?code=...
+#                            we exchange the code, persist tokens, show
+#                            a small "connected" page
+#   /auth/google/status   → small JSON the UI polls for badge state
+#   /auth/google/revoke   → POST, disconnects (revokes at Google + wipes
+#                            local token file)
+#
+# The actual OAuth lifting lives in integrations/gmail_auth.py; these
+# routes are thin shells that translate request/response shapes.
+
+def _gmail_redirect_uri(request) -> str:
+    """Build the redirect URI Google should send the user back to.
+    Must match the URI registered in the Google Cloud Console OAuth client."""
+    # Read the incoming request's scheme + host so dev (http://localhost:8001)
+    # and any future Cloudflare-tunneled URL both work without re-registering.
+    # The user is responsible for adding each variant to their OAuth client
+    # configuration in Google Cloud Console (see GMAIL_SETUP.md).
+    base = str(request.base_url).rstrip("/")
+    return base + "/auth/google/callback"
+
+
+@app.get("/auth/google/start")
+async def auth_google_start(request: Request):
+    """Kick off the OAuth flow: redirect the user to Google's consent page."""
+    try:
+        from integrations import gmail_auth
+        url = gmail_auth.start_auth_url(_gmail_redirect_uri(request))
+    except FileNotFoundError as e:
+        # client_secret.json isn't placed yet — surface a setup hint.
+        return HTMLResponse(
+            f"<h2>Gmail not set up yet</h2><p>{str(e)}</p>"
+            f"<p>See <code>GMAIL_SETUP.md</code> in the project root for the "
+            f"one-time Google Cloud Console steps.</p>",
+            status_code=400,
+        )
+    except Exception as e:
+        logger.error(f"Gmail auth start failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    return RedirectResponse(url=url, status_code=302)
+
+
+@app.get("/auth/google/callback")
+async def auth_google_callback(
+    request: Request,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """Land here after the user grants (or denies) consent at Google."""
+    if error:
+        return HTMLResponse(
+            f"<h2>Gmail connection cancelled</h2><p>Google returned: <code>{error}</code></p>"
+            f"<p><a href='/'>Back to Hunt</a></p>",
+            status_code=400,
+        )
+    if not code:
+        return HTMLResponse(
+            "<h2>Missing authorization code</h2>"
+            "<p>This page should be reached via Google's redirect. "
+            "Try starting again from <a href='/auth/google/start'>/auth/google/start</a>.</p>",
+            status_code=400,
+        )
+    try:
+        from integrations import gmail_auth
+        # `state` is what we passed to Google in start_auth_url; they echo
+        # it back here, and we use it to recover the matching PKCE
+        # code_verifier from disk for the token-exchange step.
+        result = gmail_auth.complete_auth(code, _gmail_redirect_uri(request), state)
+    except Exception as e:
+        logger.error(f"Gmail auth callback failed: {e}", exc_info=True)
+        return HTMLResponse(
+            f"<h2>Couldn't complete Gmail connection</h2><p><code>{str(e)}</code></p>"
+            f"<p><a href='/auth/google/start'>Try again</a></p>",
+            status_code=500,
+        )
+    if result.get("error"):
+        return HTMLResponse(
+            f"<h2>Gmail connection failed</h2><p>{result['error']}</p>",
+            status_code=400,
+        )
+    email = result.get("email") or "your Gmail account"
+    return HTMLResponse(
+        f"<!doctype html><html><body style='font-family:system-ui;max-width:520px;margin:80px auto;padding:0 16px'>"
+        f"<h2>✓ Hunt is connected to Gmail</h2>"
+        f"<p>Reading mail from <strong>{email}</strong>.</p>"
+        f"<p>You can close this tab and head back to Hunt — the new tools are now available in Research Mode.</p>"
+        f"<p><a href='/'>Back to Hunt</a></p>"
+        f"</body></html>"
+    )
+
+
+@app.get("/auth/google/status")
+async def auth_google_status():
+    """Small JSON the v2 settings drawer polls to render the badge."""
+    from integrations import gmail_auth
+    return gmail_auth.status()
+
+
+@app.post("/auth/google/revoke")
+async def auth_google_revoke():
+    """Disconnect Gmail — revokes the token at Google's end and wipes the local file."""
+    from integrations import gmail_auth
+    removed = gmail_auth.revoke()
+    return {"status": "disconnected" if removed else "nothing_to_revoke"}
 
 
 @app.post("/conversation/clear")

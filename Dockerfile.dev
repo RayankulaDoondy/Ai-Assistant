@@ -55,4 +55,4 @@ CMD ["python", "-m", "uvicorn", "app.main:app", \
      "--reload", "--reload-dir", "/app/app", \
      "--reload-dir", "/app/brain", "--reload-dir", "/app/memory", \
      "--reload-dir", "/app/automation", "--reload-dir", "/app/voice", \
-     "--reload-dir", "/app/config"]
+     "--reload-dir", "/app/config", "--reload-dir", "/app/integrations"]

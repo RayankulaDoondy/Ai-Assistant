@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/v2/styles.css?v=nexus20">
+<link rel="stylesheet" href="/static/v2/styles.css?v=nexus22">
 </head>
 <body>
 
@@ -175,13 +175,37 @@
   </div>
 
   <div class="dgroup">
+    <div class="gt">Integrations</div>
+    <div class="srow integ-row">
+      <div class="integ">
+        <div class="integ-head">
+          <span class="integ-icon">G</span>
+          <div class="integ-body">
+            <div class="integ-name">Gmail</div>
+            <div class="integ-status" id="gmailStatus">Checking…</div>
+          </div>
+        </div>
+        <div class="integ-hint" id="gmailHint">Hunt can search and read your Gmail to answer questions like &ldquo;did I get a bank statement in May?&rdquo;.</div>
+        <div class="integ-actions">
+          <button class="integ-btn integ-btn--primary" id="gmailConnect" type="button">Connect Gmail</button>
+          <button class="integ-btn integ-btn--ghost" id="gmailDisconnect" type="button" hidden>Disconnect</button>
+        </div>
+        <details class="integ-setup" id="gmailSetupHint" hidden>
+          <summary>Setup required &mdash; <code>data/google/client_secret.json</code> is missing</summary>
+          <p>Open <code>GMAIL_SETUP.md</code> at the project root and follow the one-time Google Cloud Console steps (~45 min). Once <code>client_secret.json</code> is in place, refresh this page and click Connect.</p>
+        </details>
+      </div>
+    </div>
+  </div>
+
+  <div class="dgroup">
     <div class="gt">Navigate</div>
     <div class="srow"><a class="h" href="/v1" style="text-decoration:underline;color:var(--orange)">Open legacy UI</a></div>
     <div class="srow"><a class="h" href="/docs" target="_blank" rel="noopener" style="text-decoration:underline;color:var(--muted)">API docs</a></div>
   </div>
 </aside>
 
-<script src="/static/v2/orb.js?v=nexus20"></script>
-<script src="/static/v2/app.js?v=nexus20"></script>
+<script src="/static/v2/orb.js?v=nexus22"></script>
+<script src="/static/v2/app.js?v=nexus22"></script>
 </body>
 </html>

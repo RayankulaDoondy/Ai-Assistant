@@ -1068,6 +1068,93 @@
   bindTog("#togNeural", "neuralBoost");
   bindTog("#togResearch", "researchMode");
 
+  // ---- Gmail integration ----
+  // Polls /auth/google/status when the drawer opens to render the right
+  // state (not connected / connected as <email> / setup required).
+  // Connect button kicks off the OAuth flow in a new tab so the user
+  // doesn't lose their place in Hunt while consenting.
+  async function refreshGmailStatus() {
+    const statusEl = $("#gmailStatus");
+    const hintEl = $("#gmailHint");
+    const connectBtn = $("#gmailConnect");
+    const disconnectBtn = $("#gmailDisconnect");
+    const setupHint = $("#gmailSetupHint");
+    if (!statusEl) return;
+    try {
+      const res = await fetch("/auth/google/status");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const s = await res.json();
+      if (!s.client_configured) {
+        statusEl.textContent = "Setup required";
+        statusEl.className = "integ-status integ-status--warn";
+        hintEl.textContent = "One-time Google Cloud Console setup is needed before you can connect.";
+        connectBtn.disabled = true;
+        connectBtn.textContent = "Connect Gmail";
+        connectBtn.hidden = false;
+        disconnectBtn.hidden = true;
+        setupHint.hidden = false;
+        return;
+      }
+      setupHint.hidden = true;
+      if (s.connected) {
+        statusEl.textContent = "Connected" + (s.email ? " as " + s.email : "");
+        statusEl.className = "integ-status integ-status--ok";
+        hintEl.textContent = "Hunt can search and read this Gmail account during Research Mode chats.";
+        connectBtn.hidden = true;
+        disconnectBtn.hidden = false;
+        disconnectBtn.disabled = false;
+      } else {
+        statusEl.textContent = "Not connected";
+        statusEl.className = "integ-status integ-status--idle";
+        hintEl.textContent = "Click Connect Gmail, sign in, and approve the read-only access.";
+        connectBtn.disabled = false;
+        connectBtn.textContent = "Connect Gmail";
+        connectBtn.hidden = false;
+        disconnectBtn.hidden = true;
+      }
+    } catch (e) {
+      statusEl.textContent = "Status unavailable";
+      statusEl.className = "integ-status integ-status--warn";
+      hintEl.textContent = "Couldn't reach Hunt: " + (e.message || e);
+      connectBtn.disabled = true;
+    }
+  }
+
+  $("#gmailConnect").onclick = () => {
+    // Open the OAuth start endpoint in a new tab so the user stays in
+    // Hunt while Google's consent flow runs. We can't iframe Google's
+    // consent screen — they block X-Frame-Origin to prevent clickjacking.
+    window.open("/auth/google/start", "_blank", "noopener");
+    // Poll status a few times so the UI flips to "Connected" once the
+    // user finishes consent in the other tab.
+    let polls = 0;
+    const t = setInterval(async () => {
+      polls++;
+      await refreshGmailStatus();
+      const stat = $("#gmailStatus")?.textContent || "";
+      if (stat.startsWith("Connected") || polls >= 60) clearInterval(t);
+    }, 3000);
+  };
+
+  $("#gmailDisconnect").onclick = async () => {
+    if (!confirm("Disconnect Gmail? Hunt will lose access; Google revokes the token on their side too.")) return;
+    const btn = $("#gmailDisconnect");
+    btn.disabled = true;
+    btn.textContent = "Disconnecting…";
+    try {
+      await fetch("/auth/google/revoke", { method: "POST" });
+      toast("Gmail disconnected");
+    } catch (e) {
+      toast("Disconnect failed: " + (e.message || e), "err");
+    }
+    btn.textContent = "Disconnect";
+    await refreshGmailStatus();
+  };
+
+  // Decorate the gear click so opening the drawer also re-fetches the
+  // Gmail status. Avoids reassigning the openDrawer function declaration.
+  $("#gear").onclick = () => { openDrawer(true); refreshGmailStatus(); };
+
   // ---- Speech rate ----
   const rateEl = $("#speechRate");
   if (rateEl) {

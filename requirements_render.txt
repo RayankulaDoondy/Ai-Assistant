@@ -32,6 +32,13 @@ sentence-transformers>=2.2.2
 rank-bm25>=0.2.2
 pypdf>=4.0.0
 
+# Phase 3 — Gmail integration. Google's official client libs handle OAuth
+# token exchange/refresh and provide a thin wrapper around the Gmail API.
+google-auth>=2.23.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1
+google-api-python-client>=2.100.0
+
 # MongoDB Atlas (you already use this)
 pymongo>=4.6.0
 
