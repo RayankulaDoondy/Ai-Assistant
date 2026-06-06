@@ -100,6 +100,12 @@ class ChatRequest(BaseModel):
     # macros like read_clipboard work even when Hunt runs inside a Linux
     # container that can't see the Windows desktop. Optional everywhere else.
     client_clipboard: Optional[str] = None
+    # Phase 1 — Information Retrieval Agent. When True, /chat/stream runs the
+    # tool-use planner: the LLM decides whether to call retrieve_memory (and
+    # in the future, gmail_search / drive_search / etc.) before answering,
+    # and the server feeds the tool results back into a streamed final reply.
+    # When False (default), the existing pre-emptive context flow runs as-is.
+    use_tools: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -698,37 +704,88 @@ def chat_stream(request: ChatRequest):  # sync: preamble + sync stream generator
     ) if model_router else None
 
     def event_stream():
+        # Response Composer V2 — depth-aware contract injected into the
+        # system prompt, dual-output (display + voice) extracted after.
+        from brain import classify_depth, build_contract, extract_voice_and_display
+
+        depth = classify_depth(intent, request.message)
+        contract = build_contract(depth, request.voice_mode)
+
+        # The contract goes into the context string so it lands as an extra
+        # system message alongside the long-term memory block. This is the
+        # minimum-touch way to bias the model without changing llm_engine.
+        effective_context = context or ""
+        if contract:
+            if effective_context:
+                effective_context = effective_context + "\n\n" + contract
+            else:
+                effective_context = contract
+
         # `role` is now included in the meta event so the UI can render code
-        # cards + suggestion chips without re-deriving it.
+        # cards + suggestion chips without re-deriving it. `depth` is included
+        # so the UI can adjust pacing / chip rendering by query weight.
         yield _json.dumps({
             "type": "meta",
             "intent": intent,
             "model": chosen_model,
             "role": effective_role,
+            "depth": depth,
         }) + "\n"
 
-        # Response Composer — wrap the raw LLM output with personality.
-        # The intro streams BEFORE the LLM tokens (so the user sees "Here you go."
-        # immediately), then the LLM streams its answer, then the outro streams
-        # AFTER. Voice mode bypasses the composer (the user wants the answer
-        # spoken, not "Here you go." preambled).
-        from brain import compose_intro, compose_outro, chunk_text
-        intro = compose_intro(intent, effective_role, request.voice_mode)
-        for piece in chunk_text(intro):
-            yield _json.dumps({"type": "token", "content": piece}) + "\n"
-
+        # Stream the LLM tokens raw. The [VOICE]: marker, if present, will
+        # arrive as part of the stream — we'll strip it at done-time before
+        # the UI renders the final text.
         collected: List[str] = []
-        try:
-            for event_type, payload in llm_engine.generate_stream(
+        # Phase 1 — when research mode is on, route through the tool-using
+        # planner. It yields the same shape of events plus two new ones
+        # (tool_call, tool_result) that we forward to the client so the UI
+        # can show a "Searching memory..." indicator + citation cards.
+        citations: List[Dict[str, Any]] = []
+        if request.use_tools:
+            stream_iter = llm_engine.chat_with_tools_stream(
                 request.message,
-                context,
+                effective_context,
                 voice_mode=request.voice_mode,
                 history=history,
                 response_length=request.response_length,
                 temperature=request.temperature,
                 model_override=chosen_model,
                 role=effective_role,
-            ):
+            )
+        else:
+            stream_iter = llm_engine.generate_stream(
+                request.message,
+                effective_context,
+                voice_mode=request.voice_mode,
+                history=history,
+                response_length=request.response_length,
+                temperature=request.temperature,
+                model_override=chosen_model,
+                role=effective_role,
+            )
+        try:
+            for event_type, payload in stream_iter:
+                if event_type == "tool_call":
+                    # Forward to the UI so it can show "Searching memory…".
+                    yield _json.dumps({
+                        "type": "tool_call",
+                        "name": payload.get("name"),
+                        "arguments": payload.get("arguments"),
+                        "label": payload.get("label"),
+                    }) + "\n"
+                    continue
+                if event_type == "tool_result":
+                    # Stash the snippets as citations the UI will render
+                    # under the final answer.
+                    result = payload.get("result") or {}
+                    for snip in (result.get("results") or []):
+                        citations.append(snip)
+                    yield _json.dumps({
+                        "type": "tool_result",
+                        "name": payload.get("name"),
+                        "count": payload.get("count"),
+                    }) + "\n"
+                    continue
                 if event_type == "token":
                     collected.append(payload)
                     yield _json.dumps({"type": "token", "content": payload}) + "\n"
@@ -737,21 +794,36 @@ def chat_stream(request: ChatRequest):  # sync: preamble + sync stream generator
                     # to the concatenation of tokens (also cleaned of <think> tags).
                     llm_text = (payload or "".join(collected)).strip()
 
-                    # Composer outro — appears AFTER the LLM answer, offering
-                    # next-step nudges. Empty for voice / trivial replies.
-                    outro = compose_outro(intent, llm_text, effective_role, request.voice_mode)
-                    for piece in chunk_text(outro):
-                        yield _json.dumps({"type": "token", "content": piece}) + "\n"
+                    # Split into display (what's shown) and voice (what's spoken).
+                    # In voice mode the contract was empty, so the whole thing is
+                    # the voice answer and display matches.
+                    if request.voice_mode:
+                        display_text = llm_text
+                        voice_text = llm_text
+                    else:
+                        display_text, voice_text = extract_voice_and_display(llm_text)
 
-                    # Build the canonical full text we persist + return in done.
-                    # Includes intro + LLM body + outro so memory shows what the
-                    # user actually saw.
-                    full = (intro or "") + llm_text + (outro or "")
+                    # Emit the speakable line as its own event so the client can
+                    # feed it to TTS without parsing markdown out of the visible text.
+                    if voice_text:
+                        yield _json.dumps({"type": "voice", "content": voice_text}) + "\n"
+
+                    full = display_text
                     try:
                         conversation_memory.add_exchange(request.message, full)
                     except Exception as e:
                         logger.warning(f"Post-stream persistence failed: {e}")
-                    yield _json.dumps({"type": "done", "response": full, "intent": intent}) + "\n"
+                    yield _json.dumps({
+                        "type": "done",
+                        "response": full,
+                        "voice_response": voice_text,
+                        "intent": intent,
+                        "depth": depth,
+                        # Phase 1: citations from any retrieve_memory calls
+                        # made during this turn. Empty list when not in
+                        # research mode or when no tools fired.
+                        "citations": citations,
+                    }) + "\n"
                     # Phase B: emit action proposal AFTER `done` so the chip
                     # renders below the assistant reply. The proposer is a
                     # cheap regex — no LLM call.

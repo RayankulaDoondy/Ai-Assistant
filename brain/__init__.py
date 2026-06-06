@@ -9,7 +9,14 @@ from .macro_runner import (
     is_macro,
     run_macro,
 )
-from .response_composer import compose_intro, compose_outro, chunk_text
+from .response_composer import (
+    compose_intro,
+    compose_outro,
+    chunk_text,
+    classify_depth,
+    build_contract,
+    extract_voice_and_display,
+)
 
 __all__ = [
     "get_llm_engine",
@@ -31,4 +38,7 @@ __all__ = [
     "compose_intro",
     "compose_outro",
     "chunk_text",
+    "classify_depth",
+    "build_contract",
+    "extract_voice_and_display",
 ]

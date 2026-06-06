@@ -28,6 +28,10 @@
     useMemory: true,
     liveSearch: false,
     neuralBoost: true,
+    // Phase 1 — Information Retrieval Agent. When on, /chat/stream uses
+    // the tool-use planner so the LLM can call retrieve_memory before
+    // answering. Costs a second LLM call per turn — off by default.
+    researchMode: false,
   };
   let prefs = loadPrefs();
   function loadPrefs() {
@@ -147,10 +151,24 @@
   function renderMd(text) {
     if (!text) return "";
     let src = escapeHtml(text);
-    src = src.replace(/```([\s\S]*?)```/g, (_, c) => `<pre>${c}</pre>`);
+
+    // Pull fenced code blocks OUT first as opaque placeholders so the
+    // line-by-line block processor below doesn't eat their newlines / fold
+    // them into a paragraph. We restore them at the end.
+    const codeBlocks = [];
+    src = src.replace(/```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```/g, (_, lang, body) => {
+      const cls = lang ? ` class="lang-${lang.toLowerCase()}"` : "";
+      // Trim only ONE leading + trailing newline so single-line code blocks
+      // still render, while keeping internal indentation intact.
+      const cleaned = body.replace(/^\n/, "").replace(/\n$/, "");
+      codeBlocks.push(`<pre><code${cls}>${cleaned}</code></pre>`);
+      return ` CODE${codeBlocks.length - 1} `;
+    });
+
     src = src.replace(/`([^`\n]+)`/g, "<code>$1</code>");
     src = src.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
     src = src.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s.,;:!?)]|$)/g, "$1<em>$2</em>");
+
     const lines = src.split("\n");
     const out = []; let list = null; let para = [];
     const flushP = () => { if (para.length) { out.push("<p>" + para.join(" ") + "</p>"); para = []; } };
@@ -158,6 +176,13 @@
     for (const raw of lines) {
       const ln = raw.trim();
       if (!ln) { flushP(); flushL(); continue; }
+      // A code-block placeholder is its own paragraph — flush surrounding state.
+      const cb = ln.match(/^ CODE(\d+) $/);
+      if (cb) {
+        flushP(); flushL();
+        out.push(codeBlocks[+cb[1]] || "");
+        continue;
+      }
       const h = ln.match(/^(#{1,3})\s+(.+)$/);
       if (h) {
         flushP(); flushL();
@@ -172,7 +197,12 @@
       para.push(ln);
     }
     flushP(); flushL();
-    return out.join("");
+
+    let html = out.join("");
+    // Restore code blocks that ended up inside a <p> because they were on
+    // the same line as surrounding prose (rare, but possible during streaming).
+    html = html.replace(/ CODE(\d+) /g, (_, i) => codeBlocks[+i] || "");
+    return html;
   }
   function makeCard(who, html) {
     const c = document.createElement("div");
@@ -360,6 +390,11 @@
     const aiText = makeCard("hunt", '<span class="cursor"></span>');
     let buffer = "";
     let firstToken = false;
+    // Response Composer V2 — server emits a separate `voice` event with the
+    // speakable summary the LLM appended after the [VOICE]: marker. We
+    // capture it here and play it on `done` so TTS speaks AFTER the visible
+    // text has settled, not over the top of streaming tokens.
+    let voiceLine = "";
 
     // Pre-flight: if the user asked about clipboard, try to read it via the
     // browser API so it works inside Docker. The fetch happens BEFORE we
@@ -391,6 +426,8 @@
           use_live_search: !!prefs.liveSearch,
           voice_mode: false,
           response_length: prefs.replyLength,
+          // Phase 1 — research mode triggers tool-use orchestration.
+          use_tools: !!prefs.researchMode,
           // Only sent when the browser successfully read the clipboard —
           // backend ignores null / missing.
           ...(clientClipboard != null ? { client_clipboard: clientClipboard } : {}),
@@ -416,12 +453,37 @@
           if (ev.type === "token") {
             if (!firstToken) { firstToken = true; setMode("speaking"); }
             buffer += ev.content || "";
-            aiText.innerHTML = renderMd(buffer) + '<span class="cursor"></span>';
+            // Hide everything from the [VOICE]: marker onward while streaming —
+            // the contract asks the LLM to put a speakable summary there, and
+            // the user should never see it. The full buffer keeps the marker
+            // for the done event to extract from.
+            aiText.innerHTML = renderMd(stripVoiceMarker(buffer)) + '<span class="cursor"></span>';
             aiText.parentElement.scrollIntoView({ behavior: "smooth", block: "end" });
+          } else if (ev.type === "tool_call") {
+            // Phase 1 — research-mode planner is about to run a tool.
+            // Surface a transient status row above the answer so the user
+            // sees that Hunt is researching, not just thinking.
+            showToolStatus(aiText, ev.label || `Running ${ev.name || "tool"}…`);
+          } else if (ev.type === "tool_result") {
+            // The tool returned; update the status row to reflect the count
+            // so the user knows how much material the answer is grounded in.
+            const n = (ev.count == null) ? "" : ` · ${ev.count} hit${ev.count === 1 ? "" : "s"}`;
+            updateToolStatus(aiText, `Pulled from memory${n}`);
+          } else if (ev.type === "voice") {
+            // Server-extracted one-sentence summary intended for TTS only.
+            // We stash it; the actual TTS fires on `done` so it speaks AFTER
+            // the visible text settles, not over the top of streaming tokens.
+            voiceLine = ev.content || "";
           } else if (ev.type === "done") {
-            buffer = ev.response || buffer;
+            // Backend now returns `response` already stripped of [VOICE]:
+            // and a separate `voice_response` for TTS. We trust those.
+            buffer = ev.response || stripVoiceMarker(buffer);
             aiText.innerHTML = renderMd(buffer);
-            if (prefs.speakReplies) speak(stripMarkdown(buffer));
+            // Render citation cards from any retrieve_memory calls.
+            const cites = Array.isArray(ev.citations) ? ev.citations : [];
+            if (cites.length) renderCitations(aiText, cites);
+            const speakable = (ev.voice_response || voiceLine || stripMarkdown(buffer)).trim();
+            if (prefs.speakReplies && speakable) speak(speakable);
           } else if (ev.type === "error") {
             aiText.innerHTML = `<span style="color:var(--red,#f87171)">Error: ${escapeHtml(ev.message || "unknown")}</span>`;
             toast("Chat error: " + (ev.message || "unknown"), "err");
@@ -486,6 +548,85 @@
       window.speechSynthesis.speak(u);
     } catch { ttsPending = false; }
   }
+  // Hide the [VOICE]: <speakable summary> tail the LLM emits per the
+  // Response Composer V2 contract. We hide it while streaming so the user
+  // never sees the marker. The match is case-insensitive and we strip
+  // everything from the marker to end-of-buffer.
+  function stripVoiceMarker(text) {
+    if (!text) return "";
+    const m = text.match(/\[\s*voice\s*\]\s*:[\s\S]*$/i);
+    if (!m) return text;
+    return text.slice(0, m.index).replace(/\s+$/, "");
+  }
+
+  // ---------------- TOOL STATUS + CITATIONS (Phase 1) ----------------
+  // Research mode emits tool_call / tool_result / citations events. We
+  // render a single status row that appears above the streaming answer,
+  // updates to "Pulled X hits", and the citation cards land under the
+  // answer once `done` fires.
+
+  function statusHost(textEl) {
+    const card = textEl.parentElement;
+    let host = card.querySelector(".tool-status");
+    if (!host) {
+      host = document.createElement("div");
+      host.className = "tool-status";
+      // Insert BEFORE the text so it reads top-to-bottom.
+      card.insertBefore(host, textEl);
+    }
+    return host;
+  }
+  function showToolStatus(textEl, label) {
+    const host = statusHost(textEl);
+    host.innerHTML = `<span class="dot"></span><span class="lbl">${escapeHtml(label)}</span>`;
+    host.classList.remove("done");
+  }
+  function updateToolStatus(textEl, label) {
+    const host = statusHost(textEl);
+    host.querySelector(".lbl") && (host.querySelector(".lbl").textContent = label);
+    host.classList.add("done");
+  }
+
+  function renderCitations(textEl, citations) {
+    const card = textEl.parentElement;
+    let host = card.querySelector(".citations");
+    if (!host) {
+      host = document.createElement("div");
+      host.className = "citations";
+      card.appendChild(host);
+    }
+    host.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "cite-head";
+    head.textContent = `Sources (${citations.length})`;
+    host.appendChild(head);
+
+    for (const c of citations) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "cite-row";
+      const kind = c.type || "memory";
+      const title = (
+        c.doc_title ||
+        c.project_name ||
+        (kind === "task" && c.snippet ? c.snippet.split("\n")[0].slice(0, 60) : "") ||
+        (kind === "conversation" ? "Past chat" : kind)
+      );
+      const snippet = (c.snippet || "").replace(/\s+/g, " ").slice(0, 180);
+      const stamp = c.timestamp ? new Date(c.timestamp).toLocaleDateString() : "";
+      row.innerHTML = `
+        <div class="cite-meta">
+          <span class="cite-kind cite-kind--${escapeHtml(kind)}">${escapeHtml(kind)}</span>
+          <span class="cite-title">${escapeHtml(title)}</span>
+          ${stamp ? `<span class="cite-stamp">${escapeHtml(stamp)}</span>` : ""}
+        </div>
+        <div class="cite-snippet">${escapeHtml(snippet)}${snippet.length >= 180 ? "…" : ""}</div>`;
+      // Click expands the row to show the full snippet inline.
+      row.onclick = () => row.classList.toggle("open");
+      host.appendChild(row);
+    }
+  }
+
   function stripMarkdown(t) {
     if (!t) return "";
     return t
@@ -916,6 +1057,7 @@
   bindTog("#togMemory", "useMemory");
   bindTog("#togLive", "liveSearch");
   bindTog("#togNeural", "neuralBoost");
+  bindTog("#togResearch", "researchMode");
 
   // ---- Speech rate ----
   const rateEl = $("#speechRate");

@@ -5,7 +5,7 @@ Handles interactions with local LLM via Ollama
 import json
 import logging
 import requests
-from typing import Optional, List, Dict, Iterator, Tuple
+from typing import Any, Optional, List, Dict, Iterator, Tuple
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -343,6 +343,11 @@ class LLMEngine:
             stream=True,
         )
         response.raise_for_status()
+        # Force UTF-8. `requests` defaults to ISO-8859-1 (Latin-1) when the
+        # Content-Type header omits a charset (RFC 2616), and OpenAI/Ollama
+        # streaming responses do exactly that. Without this override every
+        # non-ASCII character (•, ², é, …) arrives mojibaked.
+        response.encoding = "utf-8"
 
         buffer: List[str] = []
         for raw in response.iter_lines(decode_unicode=True):
@@ -565,6 +570,9 @@ class LLMEngine:
             stream=True,
         )
         response.raise_for_status()
+        # Force UTF-8 — same reason as the Ollama streamer above. Without
+        # this, "•" arrives as "â€¢" and "²" as "Â²".
+        response.encoding = "utf-8"
 
         buffer: List[str] = []
         for raw in response.iter_lines(decode_unicode=True):
@@ -587,6 +595,234 @@ class LLMEngine:
 
         full = self._strip_thinking("".join(buffer)).strip()
         yield "done", full
+
+    # ================================================================== #
+    # Tool use — Phase 1 of the Information Retrieval Agent
+    # ================================================================== #
+    # The flow is:
+    #   1. Non-streaming call with `tools` schema → may produce tool_calls
+    #   2. If tool_calls were produced, execute each, append results to history
+    #   3. Streaming call (no tools) → final grounded answer
+    # The caller (chat handler) just iterates the yielded events and decides
+    # how to surface them to the UI.
+
+    def _chat_openai_compat_with_tools(
+        self,
+        provider: str,
+        model: str,
+        messages: List[Dict],
+        tools: List[Dict],
+        num_predict: int,
+        temperature: float,
+        tool_choice: str = "auto",
+    ) -> Dict:
+        """One non-streaming call that returns the full assistant message
+        (including any tool_calls). Used as the planning step before the
+        streaming answer."""
+        base_url, api_key, timeout, extra_headers = self._provider_request_config(provider)
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type":  "application/json",
+            **extra_headers,
+        }
+        body = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "temperature": temperature,
+            "max_tokens": num_predict,
+            "tools": tools,
+            "tool_choice": tool_choice,
+        }
+        response = requests.post(
+            f"{base_url}/chat/completions",
+            headers=headers,
+            json=body,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        choices = data.get("choices") or []
+        if not choices:
+            return {"content": "", "tool_calls": []}
+        msg = choices[0].get("message") or {}
+        return {
+            "content": (msg.get("content") or "").strip(),
+            "tool_calls": msg.get("tool_calls") or [],
+        }
+
+    def chat_with_tools_stream(
+        self,
+        prompt: str,
+        context: Optional[str] = None,
+        voice_mode: bool = False,
+        history: Optional[List[Dict[str, str]]] = None,
+        response_length: Optional[str] = None,
+        temperature: Optional[float] = None,
+        model_override=None,
+        role: Optional[str] = None,
+    ) -> Iterator[Tuple[str, Any]]:
+        """Stream a tool-using chat turn.
+
+        Yields events of the same shape as generate_stream, plus two new ones:
+            ("tool_call",   {"name", "arguments", "id", "label"})
+            ("tool_result", {"name", "id", "result", "count"})
+
+        Tool execution happens between a non-streaming planner call and the
+        streamed final answer. If the planner emits NO tool calls, we still
+        stream a fresh answer so the UX is consistent.
+        """
+        from brain.tools import list_tools, execute as execute_tool, summarize_tool_call_for_ui
+
+        # Build the candidate-model list the same way generate_stream does.
+        if isinstance(model_override, (list, tuple)):
+            candidates = [str(m) for m in model_override if m]
+        elif model_override:
+            candidates = [model_override]
+        else:
+            candidates = [self.model_name]
+        if not candidates:
+            candidates = [self.model_name]
+
+        # Tool use needs a model that supports the tools array. Walk the
+        # fallback chain in order — the first cloud provider with a key
+        # wins. Local Ollama is skipped (it doesn't speak this protocol).
+        plan_model = None
+        plan_provider = None
+        for m in candidates:
+            provider, real_model = self._provider_and_model(m)
+            if provider in self.OPENAI_COMPAT_PROVIDERS:
+                try:
+                    self._provider_request_config(provider)
+                except RuntimeError:
+                    continue
+                plan_model = real_model
+                plan_provider = provider
+                break
+        if plan_provider is None:
+            yield "error", "Tool use needs an OpenAI-compatible provider with a configured key (OpenRouter / Groq / Gemini)."
+            return
+
+        # Compose the message history. In research mode the TOOL INSTRUCTIONS
+        # come FIRST in the system message (before the persona/contract) so
+        # the model reads them as the primary directive. Models otherwise
+        # treat tool use as optional and answer from training data, which
+        # defeats the whole point of research mode.
+        #
+        # IMPORTANT: bypass the coder persona in research mode. CODER_SYSTEM_PROMPT
+        # says "ALWAYS produce complete working code, NEVER refuse" — that
+        # overrides MANDATORY tool-use instructions and produces code-style
+        # answers to memory-recall questions. Use the general persona instead.
+        research_role = None if role == "coder" else role
+        system_message = self._system_prompt_for(research_role, voice_mode)
+        tool_addendum = (
+            "RESEARCH MODE — TOOL USE IS MANDATORY\n\n"
+            "You are in research mode. Your job is to GROUND every answer in "
+            "the user's actual data, not in your training knowledge.\n\n"
+            "BEFORE you write any answer, you MUST call `retrieve_memory` if "
+            "the user's question contains ANY of these signals:\n"
+            "  • Asks about something they did, said, wrote, decided, or "
+            "encountered ('what did we…', 'remind me of…', 'find the…', "
+            "'show me…', 'what was the…', 'when did I…')\n"
+            "  • Names a specific project, document, file, person, or topic "
+            "they own ('the bubble sort code', 'my resume', 'the Travel "
+            "Planner project', 'the bank statement')\n"
+            "  • Asks for a recall, recap, or status of their work\n"
+            "  • Asks about ANY error, bug, fix, decision, or conversation "
+            "from earlier\n\n"
+            "Do NOT call it for: general knowledge ('what is bubble sort'), "
+            "computation ('what is 7×8'), greetings, or hypotheticals.\n\n"
+            "When in doubt — CALL IT. A search that returns zero hits is "
+            "fine; making up an answer from training data when the user "
+            "asked about their own life is NOT fine.\n\n"
+            "After the tool returns:\n"
+            "  • If results were found, ground your answer in the snippets "
+            "and cite the source naturally ('from your earlier chat', 'from "
+            "the Travel Planner project notes').\n"
+            "  • If results were empty, say PLAINLY that you searched and "
+            "found nothing — do NOT then answer from training data as if "
+            "the question were generic. Suggest the user check if the topic "
+            "was discussed in a different session or context.\n\n"
+            "---\n\n"
+        )
+        # PREPEND tool instructions, then the normal persona prompt. The
+        # response composer contract still arrives as the next system message
+        # (via `context`).
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": tool_addendum + system_message}
+        ]
+        if context:
+            messages.append({"role": "system", "content": context})
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": prompt})
+
+        num_predict = self._resolve_length_budget(response_length, voice_mode, role)
+        temp = self._resolve_temperature(temperature, self.temperature)
+        tools = list_tools()
+
+        # ---- Planning call --------------------------------------------
+        # `tool_choice="required"` forces the LLM to call at least one tool.
+        # With only retrieve_memory registered, that's equivalent to "always
+        # search memory first". This is what research mode promises — the
+        # user toggled it ON precisely to demand grounded answers. Wasteful
+        # on trivial queries (a "what's 7×8" still triggers a search) but
+        # that's the contract of research mode being opt-in.
+        logger.info(f"Research planner: provider={plan_provider} model={plan_model} prompt='{prompt[:60]}'")
+        try:
+            plan = self._chat_openai_compat_with_tools(
+                plan_provider, plan_model, messages, tools,
+                num_predict=min(num_predict, 800),
+                temperature=temp,
+                tool_choice="required",
+            )
+        except Exception as e:
+            logger.warning(f"Tool-use planner failed ({e}); falling back to plain stream")
+            yield from self._stream_openai_compat(plan_provider, plan_model, messages, num_predict, temp)
+            return
+
+        tool_calls = plan.get("tool_calls") or []
+        logger.info(f"Research planner result: tool_calls={len(tool_calls)}, raw_content_len={len(plan.get('content') or '')}")
+
+        if tool_calls:
+            messages.append({
+                "role": "assistant",
+                "content": plan.get("content") or None,
+                "tool_calls": tool_calls,
+            })
+            for call in tool_calls:
+                fn_block = call.get("function") or {}
+                name = fn_block.get("name") or ""
+                raw_args = fn_block.get("arguments") or "{}"
+                call_id = call.get("id") or ""
+                try:
+                    parsed_args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                except json.JSONDecodeError:
+                    parsed_args = {}
+                yield "tool_call", {
+                    "name": name,
+                    "arguments": parsed_args,
+                    "id": call_id,
+                    "label": summarize_tool_call_for_ui(name, parsed_args),
+                }
+                result = execute_tool(name, raw_args)
+                yield "tool_result", {
+                    "name": name,
+                    "id": call_id,
+                    "result": result,
+                    "count": (result or {}).get("count"),
+                }
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": name,
+                    "content": json.dumps(result, ensure_ascii=False),
+                })
+
+        # ---- Final streamed answer (with or without tool context) ----
+        yield from self._stream_openai_compat(
+            plan_provider, plan_model, messages, num_predict, temp,
+        )
 
     # Back-compat shims — the rest of the engine still imports these names.
     def _chat_openrouter(self, model, messages, num_predict, temperature):
