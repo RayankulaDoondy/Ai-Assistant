@@ -35,6 +35,14 @@ services:
       # Persistent cache dirs.
       - CHROMA_PATH=/data/chroma
       - DATA_DIR=/data
+      # Phase 4 — Windows-side desktop helper. When this URL is set,
+      # action_runner POSTs every desktop / browser action to the helper
+      # script running natively on Windows (so "open chrome" actually
+      # opens Chrome on the host). `host.docker.internal` is Docker
+      # Desktop's magic DNS for the host machine. The helper itself is
+      # started by run_helper.bat on Windows — until then, action chips
+      # resolve with a friendly "helper isn't running" message.
+      - HUNT_HELPER_URL=http://host.docker.internal:9100
     volumes:
       # Live source mount — edit a .py file on your host, --reload picks it
       # up inside the container in under 2 seconds.
