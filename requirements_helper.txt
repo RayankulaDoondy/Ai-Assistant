@@ -1,0 +1,25 @@
+# Dependencies for the Windows-native desktop helper.
+# Install once with:  pip install -r requirements_helper.txt
+#
+# These are SEPARATE from Hunt's container deps (requirements.txt /
+# requirements_render.txt) because the helper runs on Windows directly
+# and only needs the action + wake-word stack — not the LLM / Chroma /
+# Whisper machinery.
+
+# Action chips (existing — open_app / close_app / open_browser / search)
+requests>=2.31
+
+# Wake-word detection ("Hey Jarvis").
+# openwakeword auto-downloads pre-trained .onnx models on first use
+# (cached under %USERPROFILE%\.cache\openwakeword on Windows). No API
+# key, no signup, MIT-licensed.
+openwakeword>=0.6.0
+
+# PortAudio wrapper for mic capture. Ships PortAudio binaries in its
+# Windows wheel — pip install just works, no C toolchain needed.
+sounddevice>=0.4.6
+
+# openwakeword needs numpy for tensor I/O and onnxruntime for inference.
+# onnxruntime is pulled in transitively but pinning numpy avoids
+# surprises with future major versions.
+numpy>=1.24,<3
