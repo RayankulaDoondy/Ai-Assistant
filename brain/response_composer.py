@@ -57,10 +57,11 @@ _HEAVY_INTENTS = {"code_help", "reasoning"}
 _RECALL_SIGNALS = (
     # Possessives — they're asking about THEIR stuff
     " my ", " our ", " we ", "i've", "i did", "i wrote", "i made", "i built",
-    "i created", "i uploaded", "i asked", "i told",
+    "i created", "i uploaded", "i asked", "i told", "i received", "i got",
     # Time references — implies past activity
     "earlier", "before", "previously", "yesterday", "last week", "last time",
     "last session", "last chat", "this morning", "today's", "this week",
+    "last month", "this month", "received today", "received yesterday",
     # Recall verbs
     "find ", "search ", "show me", "tell me about", "remind me",
     "what was", "what were", "what did", "what do i", "what do we",
@@ -69,6 +70,31 @@ _RECALL_SIGNALS = (
     "list my", "list our", "list the", "list all",
     # Continuation
     "continue", "pick up where", "resume",
+    # Email / inbox shapes — without these, "any mail from X" and "did I get
+    # any email" slip past the recall gate, the gmail_search tool never fires,
+    # and the LLM falls back to its training and fabricates an answer.
+    "any mail", "any mails", "any email", "any emails",
+    "mail from", "mails from", "email from", "emails from",
+    "mail about", "email about", "mail regarding", "email regarding",
+    "in my inbox", "in the inbox", "from my inbox", "inbox for",
+    "check my mail", "check my email", "check my inbox", "check my gmail",
+    "any messages from", "any message from",
+    "did i get", "have i received", "have i got", "is there any mail",
+    "is there any email", "is there any mails", "is there any emails",
+    # Calendar / schedule shapes — same gate as Gmail: without these,
+    # "what's on my calendar today" or "any meetings tomorrow" skip the
+    # tool flow and the LLM hallucinates a generic "I don't know" or, worse,
+    # falls back to gmail_search and answers "Pulled from Gmail · 0 hits".
+    "calendar", "on my calendar", "my schedule", "on my schedule",
+    "free at", "busy at", "available at", "do i have anything",
+    "what's today", "whats today", "what is today",
+    "what's tomorrow", "whats tomorrow", "what is tomorrow",
+    "any meeting", "any meetings", "meeting today", "meetings today",
+    "meeting tomorrow", "meetings tomorrow", "meeting with", "meetings with",
+    "event today", "events today", "event tomorrow", "events tomorrow",
+    "what did i attend", "what i attended", "did i attend",
+    "next meeting", "next event", "next appointment",
+    "appointment", "appointments",
 )
 
 

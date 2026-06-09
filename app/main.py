@@ -7,7 +7,7 @@ import re
 import json as _json
 
 import uuid
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -597,6 +597,33 @@ async def get_briefing():
         return payload.to_dict()
     except Exception as e:
         logger.error(f"Briefing compose error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/briefing/recommend")
+async def get_briefing_recommendations():
+    """Chief of Staff synthesis: collect briefing facts, then ask the LLM
+    to pick the user's top 1-3 priorities right now. Returns both the
+    raw facts and the synthesized priorities so the UI can render them
+    side-by-side or progressively.
+
+    Separate endpoint from /briefing because the LLM call adds 1-3s of
+    latency. Letting the UI render the facts first (fast) and then
+    progressively add the priorities (slower) is better UX than blocking
+    the whole render on the LLM."""
+    if not briefing_composer:
+        raise HTTPException(status_code=503, detail="Briefing composer not initialized")
+    if not llm_engine:
+        raise HTTPException(status_code=503, detail="LLM engine not initialized")
+    try:
+        facts = briefing_composer.compose()
+        recs = briefing_composer.compose_recommendations(facts, llm_engine)
+        return {
+            "briefing":        facts.to_dict(),
+            "recommendations": recs.to_dict(),
+        }
+    except Exception as e:
+        logger.error(f"Briefing recommend error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2112,6 +2139,187 @@ async def auth_google_revoke():
     from integrations import gmail_auth
     removed = gmail_auth.revoke()
     return {"status": "disconnected" if removed else "nothing_to_revoke"}
+
+
+# =================================================================== #
+# Phase 4 — Google Calendar OAuth endpoints
+# =================================================================== #
+# Same flow shape as Gmail (start → callback → status → revoke) but
+# pointed at integrations/calendar_auth.py so the two grants stay
+# independent. The same client_secret.json works for both because we
+# request a different scope set per flow.
+
+def _calendar_redirect_uri(request) -> str:
+    base = str(request.base_url).rstrip("/")
+    return base + "/auth/google-calendar/callback"
+
+
+@app.get("/auth/google-calendar/start")
+async def auth_calendar_start(request: Request):
+    """Kick off the Calendar OAuth flow."""
+    try:
+        from integrations import calendar_auth
+        url = calendar_auth.start_auth_url(_calendar_redirect_uri(request))
+    except FileNotFoundError as e:
+        return HTMLResponse(
+            f"<h2>Google not set up yet</h2><p>{str(e)}</p>"
+            f"<p>See <code>GMAIL_SETUP.md</code> in the project root for the "
+            f"one-time Google Cloud Console steps — the same OAuth client "
+            f"covers Gmail and Calendar.</p>",
+            status_code=400,
+        )
+    except Exception as e:
+        logger.error(f"Calendar auth start failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    return RedirectResponse(url=url, status_code=302)
+
+
+@app.get("/auth/google-calendar/callback")
+async def auth_calendar_callback(
+    request: Request,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """Land here after the user grants (or denies) consent at Google."""
+    if error:
+        return HTMLResponse(
+            f"<h2>Calendar connection cancelled</h2><p>Google returned: <code>{error}</code></p>"
+            f"<p><a href='/'>Back to Hunt</a></p>",
+            status_code=400,
+        )
+    if not code:
+        return HTMLResponse(
+            "<h2>Missing authorization code</h2>"
+            "<p>This page should be reached via Google's redirect. "
+            "Try starting again from <a href='/auth/google-calendar/start'>/auth/google-calendar/start</a>.</p>",
+            status_code=400,
+        )
+    try:
+        from integrations import calendar_auth
+        result = calendar_auth.complete_auth(code, _calendar_redirect_uri(request), state)
+    except Exception as e:
+        logger.error(f"Calendar auth callback failed: {e}", exc_info=True)
+        return HTMLResponse(
+            f"<h2>Couldn't complete Calendar connection</h2><p><code>{str(e)}</code></p>"
+            f"<p><a href='/auth/google-calendar/start'>Try again</a></p>",
+            status_code=500,
+        )
+    if result.get("error"):
+        return HTMLResponse(
+            f"<h2>Calendar connection failed</h2><p>{result['error']}</p>",
+            status_code=400,
+        )
+    email = result.get("email") or "your Google account"
+    return HTMLResponse(
+        f"<!doctype html><html><body style='font-family:system-ui;max-width:520px;margin:80px auto;padding:0 16px'>"
+        f"<h2>✓ Hunt is connected to Google Calendar</h2>"
+        f"<p>Reading calendar from <strong>{email}</strong>.</p>"
+        f"<p>You can close this tab and head back to Hunt — calendar queries now work in Research Mode.</p>"
+        f"<p><a href='/'>Back to Hunt</a></p>"
+        f"</body></html>"
+    )
+
+
+@app.get("/auth/google-calendar/status")
+async def auth_calendar_status():
+    """Status JSON the settings drawer polls to render the Calendar badge."""
+    from integrations import calendar_auth
+    return calendar_auth.status()
+
+
+@app.post("/auth/google-calendar/revoke")
+async def auth_calendar_revoke():
+    """Disconnect Calendar — revoke at Google + wipe local token file."""
+    from integrations import calendar_auth
+    removed = calendar_auth.revoke()
+    return {"status": "disconnected" if removed else "nothing_to_revoke"}
+
+
+# =================================================================== #
+# Phase 5 — Wake-word ("Hey Jarvis") fan-out
+# =================================================================== #
+# Flow:
+#   desktop_helper.py wake_listener detects the wake phrase locally
+#     → POSTs /voice/wakeword with {wake_word, confidence}
+#   /voice/wakeword pushes the event onto a small in-process pub-sub queue
+#   The UI subscribes via SSE on /voice/wakeword/stream and reacts by
+#     triggering the same mic flow as tapping the orb (fab.click()).
+#
+# The pub-sub is in-process only — fine for a single-user local install.
+# If Hunt ever scales to a multi-process deployment, replace with Redis pubsub.
+
+import asyncio as _asyncio  # avoid name clash; module is imported above too in some envs.
+
+# Each connected UI gets its own queue. Putting a wake event broadcasts
+# to every connected subscriber (typically one — your active browser tab).
+_wake_subscribers: List[_asyncio.Queue] = []
+
+
+@app.post("/voice/wakeword")
+async def voice_wakeword(payload: dict = Body(default={})):
+    """Receive a wake-word detection from the desktop helper and fan it out
+    to any UI listeners subscribed via SSE.
+
+    Payload shape:  {"wake_word": "hey_jarvis_v0.1", "confidence": 0.78}
+    Both fields are optional — defaults are filled in below."""
+    event = {
+        "wake_word":   payload.get("wake_word") or "hey_jarvis",
+        "confidence":  float(payload.get("confidence") or 0.0),
+        "timestamp":   datetime.now().isoformat(timespec="seconds"),
+    }
+    # Snapshot the list so a subscriber disconnecting mid-loop doesn't
+    # mutate what we're iterating.
+    delivered = 0
+    for q in list(_wake_subscribers):
+        try:
+            q.put_nowait(event)
+            delivered += 1
+        except _asyncio.QueueFull:
+            # Subscriber is sluggish — drop this event for them rather
+            # than blocking the producer.
+            logger.debug("wakeword: subscriber queue full, dropping event")
+    logger.info(f"wakeword: {event['wake_word']} @ {event['confidence']:.2f} → {delivered} subs")
+    return {"ok": True, "delivered_to": delivered}
+
+
+@app.get("/voice/wakeword/stream")
+async def voice_wakeword_stream(request: Request):
+    """Server-Sent Events endpoint the UI subscribes to. Streams wake
+    events as they happen, with periodic keepalives so reverse proxies
+    don't close the idle connection."""
+    queue: _asyncio.Queue = _asyncio.Queue(maxsize=8)
+    _wake_subscribers.append(queue)
+
+    async def event_gen():
+        try:
+            # Initial 'connected' ping so the client can detect a successful
+            # subscribe even before any wake word fires.
+            yield "event: connected\ndata: {}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await _asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"event: wake\ndata: {_json.dumps(event)}\n\n"
+                except _asyncio.TimeoutError:
+                    # Comment line — SSE clients ignore it, but it keeps
+                    # the TCP connection warm through nginx / Cloudflare.
+                    yield ": keepalive\n\n"
+        finally:
+            try:
+                _wake_subscribers.remove(queue)
+            except ValueError:
+                pass
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable nginx buffering for SSE
+        },
+    )
 
 
 @app.post("/conversation/clear")

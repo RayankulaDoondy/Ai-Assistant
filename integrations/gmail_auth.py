@@ -39,6 +39,14 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# Google's `include_granted_scopes=true` makes the token response include
+# ALL scopes the user has ever granted this OAuth client (Calendar's, etc.),
+# not just the ones we asked for in THIS flow. google-auth-oauthlib then
+# refuses the token with "Scope has changed from X to X+Y" — even though
+# the superset is benign. Relaxing scope validation accepts it. Read by
+# oauthlib at validation time, so import-time set is enough.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
 # --------------------------------------------------------------------- #
 # Paths + constants
 # --------------------------------------------------------------------- #

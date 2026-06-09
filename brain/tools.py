@@ -191,12 +191,85 @@ GMAIL_READ_SCHEMA: Dict[str, Any] = {
 }
 
 
+CALENDAR_SEARCH_SCHEMA: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "calendar_search",
+        "description": (
+            "Search the user's Google Calendar and return a list of events "
+            "(title, start, end, location, attendees, conferencing link). "
+            "Use whenever the user asks about CALENDAR / SCHEDULE / MEETINGS: "
+            "'what's on my calendar today', 'do I have anything tomorrow', "
+            "'meetings with Alex this week', 'what did I attend yesterday', "
+            "'next event', 'am I free at 3pm'. \n\n"
+            "Parameters:\n"
+            "  query — optional free-text. Matches event title, description, "
+            "          location, attendee names. Omit when the question is "
+            "          purely about a time window ('what's today').\n"
+            "  time_min — ISO timestamp (RFC3339) for the START of the search "
+            "          window. Examples: '2026-06-08T00:00:00Z' for midnight "
+            "          UTC, '2026-06-08T00:00:00+05:30' with an offset. Omit "
+            "          to default to 'now'.\n"
+            "  time_max — ISO timestamp for the END. Omit to default to "
+            "          time_min + 7 days.\n"
+            "  max_results — cap on returned events. Default 10, max 50.\n\n"
+            "Common windows you can construct yourself from today's date "
+            "(provided in the system prompt):\n"
+            "  today        → time_min = today 00:00, time_max = today 23:59\n"
+            "  tomorrow     → time_min = tomorrow 00:00, time_max = tomorrow 23:59\n"
+            "  this week    → time_min = today, time_max = today + 7d\n"
+            "  yesterday    → time_min = yesterday 00:00, time_max = today 00:00\n\n"
+            "If the user hasn't connected Calendar yet, the tool returns an "
+            "explicit 'calendar_not_connected' error — tell them to open the "
+            "settings drawer and click Connect Google Calendar. Do NOT make up "
+            "events when the search returns nothing or fails."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Optional free-text query matched against event "
+                        "title, description, location, attendees. Omit when "
+                        "the user only asks about a time window."
+                    ),
+                },
+                "time_min": {
+                    "type": "string",
+                    "description": (
+                        "RFC3339 timestamp for the start of the window. "
+                        "Defaults to 'now' when omitted."
+                    ),
+                },
+                "time_max": {
+                    "type": "string",
+                    "description": (
+                        "RFC3339 timestamp for the end of the window. "
+                        "Defaults to time_min + 7 days when omitted."
+                    ),
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Cap on returned events. Default 10, max 50.",
+                    "default": 10,
+                    "minimum": 1,
+                    "maximum": 50,
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
+
 # Registry of every schema the LLM is told about. Ordered roughly by how
 # often each tool is likely to be useful.
 TOOL_SCHEMAS: List[Dict[str, Any]] = [
     RETRIEVE_MEMORY_SCHEMA,
     GMAIL_SEARCH_SCHEMA,
     GMAIL_READ_SCHEMA,
+    CALENDAR_SEARCH_SCHEMA,
 ]
 
 
@@ -477,10 +550,140 @@ def _execute_gmail_read(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# --------------------------------------------------------------------- #
+# Calendar tool — Phase 4
+# --------------------------------------------------------------------- #
+
+def _execute_calendar_search(args: Dict[str, Any]) -> Dict[str, Any]:
+    """LLM-callable Google Calendar search. Returns events in the same
+    citation-friendly shape as gmail_search / retrieve_memory."""
+    query = (args.get("query") or "").strip() or None
+    time_min = (args.get("time_min") or "").strip() or None
+    time_max = (args.get("time_max") or "").strip() or None
+
+    max_results = args.get("max_results", 10)
+    try:
+        max_results = max(1, min(50, int(max_results)))
+    except (TypeError, ValueError):
+        max_results = 10
+
+    try:
+        from integrations.calendar_client import CalendarClient
+    except Exception as e:
+        logger.warning(f"calendar_search: import failed ({e})")
+        return {"error": f"calendar integration unavailable: {e}", "results": [], "count": 0}
+
+    client = CalendarClient()
+    if not client.available():
+        return {
+            "error": "calendar_not_connected",
+            "message": client.error() or "Google Calendar not connected.",
+            "results": [],
+            "count": 0,
+        }
+
+    raw = client.search(
+        query=query,
+        time_min=time_min,
+        time_max=time_max,
+        max_results=max_results,
+    )
+    if raw.get("error"):
+        return {"error": raw["error"], "results": [], "count": 0}
+
+    compact: List[Dict[str, Any]] = []
+    for ev in raw.get("results") or []:
+        # Build a one-line snippet the model can quote AND the citation
+        # card can render below the title.
+        bits = []
+        when = _format_event_when(ev)
+        if when:
+            bits.append(when)
+        if ev.get("location"):
+            bits.append(f"at {ev['location']}")
+        if ev.get("attendee_count"):
+            bits.append(f"{ev['attendee_count']} attendee" + ("s" if ev["attendee_count"] != 1 else ""))
+        if ev.get("meet_link"):
+            bits.append("Meet")
+        snippet_lead = " · ".join(bits)
+        desc = ev.get("description") or ""
+        snippet = (snippet_lead + ("\n" + desc if desc else ""))[:400]
+
+        compact.append({
+            "snippet": snippet,
+            "title": ev.get("summary") or "(no title)",
+            "type": "calendar",
+            "id": ev.get("id"),
+            "event_id": ev.get("id"),
+            "start": ev.get("start") or "",
+            "end": ev.get("end") or "",
+            "location": ev.get("location") or "",
+            "attendees": ev.get("attendees") or "",
+            "organizer": ev.get("organizer") or "",
+            "meet_link": ev.get("meet_link") or "",
+            "html_link": ev.get("html_link") or "",
+            "all_day": bool(ev.get("all_day")),
+            # Mirror conversation/Gmail timestamp slot so dedupe + sort behave.
+            "timestamp": ev.get("start") or None,
+            # Per-source slots the citation rendering already understands —
+            # not applicable to Calendar.
+            "project_id": None,
+            "project_name": None,
+            "doc_id": None,
+            "doc_title": None,
+        })
+
+    return {
+        "query": query or "",
+        "time_min": raw.get("time_min"),
+        "time_max": raw.get("time_max"),
+        "results": compact,
+        "count": len(compact),
+        "user_email": raw.get("user_email"),
+    }
+
+
+def _format_event_when(ev: Dict[str, Any]) -> str:
+    """Render an event's start/end into a short human string the LLM can
+    quote ('Mon 9 Jun · 14:00–15:00' or 'Tue 10 Jun · all day').
+
+    Best-effort — falls back to raw ISO if parsing fails. The point is to
+    give the model a phrasing it can lift verbatim instead of converting
+    'dateTime: 2026-06-09T14:00:00+05:30' itself (which it does poorly)."""
+    start = ev.get("start") or ""
+    end = ev.get("end") or ""
+    if not start:
+        return ""
+    if ev.get("all_day"):
+        return f"{_short_day(start)} · all day"
+    try:
+        s = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        e = datetime.fromisoformat(end.replace("Z", "+00:00")) if end else None
+    except Exception:
+        return f"{start}{(' → ' + end) if end else ''}"
+    day = s.strftime("%a %d %b")
+    s_t = s.strftime("%H:%M")
+    if e and e.date() == s.date():
+        return f"{day} · {s_t}–{e.strftime('%H:%M')}"
+    if e:
+        return f"{day} {s_t} → {e.strftime('%a %d %b')} {e.strftime('%H:%M')}"
+    return f"{day} · {s_t}"
+
+
+def _short_day(value: str) -> str:
+    """All-day events come as 'yyyy-mm-dd' strings. Render 'Mon 9 Jun'."""
+    try:
+        d = datetime.fromisoformat(value).date()
+        return d.strftime("%a %d %b")
+    except Exception:
+        return value
+
+
 TOOL_EXECUTORS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
-    "retrieve_memory": _execute_retrieve_memory,
-    "gmail_search":    _execute_gmail_search,
-    "gmail_read":      _execute_gmail_read,
+    "retrieve_memory":  _execute_retrieve_memory,
+    "gmail_search":     _execute_gmail_search,
+    "gmail_read":       _execute_gmail_read,
+    "calendar_search":  _execute_calendar_search,
 }
 
 
@@ -539,4 +742,10 @@ def summarize_tool_call_for_ui(name: str, args: Dict[str, Any]) -> str:
     if name == "gmail_read":
         mid = (args or {}).get("message_id") or ""
         return f"Reading Gmail message {mid[:12]}…"
+    if name == "calendar_search":
+        q = (args or {}).get("query") or ""
+        if q:
+            return f"Searching Calendar for: {q[:60]}"
+        tm = (args or {}).get("time_min") or ""
+        return f"Searching Calendar{(' from ' + tm[:16]) if tm else ' (next 7 days)'}…"
     return f"Running {name}…"
