@@ -78,42 +78,68 @@ button{cursor:pointer;border:none;background:none;color:inherit}
 .dcard .val{margin-left:auto;font-weight:600;color:var(--text)}
 @keyframes slideL{from{opacity:0;transform:translateX(-18px)}to{opacity:1;transform:none}}
 
-/* ---------- activity timeline (right) ---------- */
+/* ---------- activity timeline (LEFT column, below the diag cards) ---------- */
+/* Lives on the left side, well clear of the orb's satellite-orbit zone on the
+   right. Previously sat in the right column where the satellites would visually
+   overlap it during the breathing/spinning animation. */
 .timeline{
-  position:fixed;top:50%;right:28px;transform:translateY(-50%);z-index:20;
+  position:fixed;top:auto;bottom:140px;left:28px;right:auto;z-index:20;
   display:flex;flex-direction:column;gap:0;
-  padding:18px 18px;border-radius:18px;
+  padding:14px 16px;border-radius:16px;
   background:var(--panel);border:1px solid var(--border);backdrop-filter:blur(16px);
   box-shadow:var(--shadow);
   animation:slideR .6s cubic-bezier(.22,1,.36,1) both;
 }
-@keyframes slideR{from{opacity:0;transform:translate(18px,-50%)}to{opacity:1;transform:translateY(-50%)}}
+@keyframes slideR{from{opacity:0;transform:translate(-18px,0)}to{opacity:1;transform:none}}
+/* Idle steps: bumped from --faint (.3 alpha) to a higher-contrast --muted
+   tone, and the node/connector borders bumped from --border2 (.16) to .35,
+   so the pipeline reads as a real visible track at rest — not a ghost. */
 .tstep{
-  display:flex;align-items:center;gap:11px;font-size:12px;color:var(--faint);
+  display:flex;align-items:center;gap:11px;font-size:12px;
+  color:rgba(255,255,255,.7);font-weight:500;
   padding:7px 0;position:relative;
 }
 .tstep .node{
-  width:13px;height:13px;border-radius:50%;border:1.5px solid var(--border2);
+  width:13px;height:13px;border-radius:50%;
+  border:1.5px solid rgba(255,255,255,.38);
+  background:rgba(255,255,255,.05);
   flex:none;transition:.3s;position:relative;
 }
 .tstep:not(:last-child)::after{
   content:"";position:absolute;left:6px;top:24px;width:1.5px;height:18px;
-  background:var(--border2);transition:.3s;
+  background:rgba(255,255,255,.22);transition:.3s;
 }
 .tstep.active .node{
   border-color:var(--orange);background:var(--orange);
   box-shadow:0 0 12px var(--orange);
 }
 .tstep.done .node{border-color:var(--orange);background:var(--orange)}
-.tstep.active,.tstep.done{color:var(--text);font-weight:500}
+.tstep.active,.tstep.done{color:var(--text);font-weight:600}
 .tstep.done::after{background:var(--orange)}
 
-/* ---------- orb stage ---------- */
-.stage{
-  min-height:84vh;display:flex;flex-direction:column;align-items:center;justify-content:center;
-  position:relative;padding:110px 20px 30px;
+/* Light theme — idle steps need different alphas because they sit on a
+   light-panel background, where white-alpha goes invisible. */
+html[data-theme="light"] .tstep{color:rgba(26,20,16,.72)}
+html[data-theme="light"] .tstep .node{
+  border-color:rgba(26,20,16,.4);
+  background:rgba(0,0,0,.04);
 }
-.orb-box{position:relative;width:min(82vw,470px);height:min(82vw,470px)}
+html[data-theme="light"] .tstep:not(:last-child)::after{background:rgba(26,20,16,.22)}
+
+/* ---------- orb stage (docked to the right column) ---------- */
+/* The stage used to be the centered hero. New layout: chat feed is the primary
+   surface and takes the main column; the orb is a fixed companion in the right
+   ~360px gutter, vertically centered, visible while the user scrolls chat. */
+.stage{
+  position:fixed;top:96px;right:24px;width:360px;
+  display:flex;flex-direction:column;align-items:center;justify-content:flex-start;
+  z-index:15;padding:0;pointer-events:none;
+}
+.stage > *{pointer-events:auto}
+/* Orb is smaller now that it lives in the side column. Padding inside the
+   .stage box (the 24px right offset above) means even at full satellite swing
+   the orbiters never reach the viewport edge. */
+.orb-box{position:relative;width:320px;height:320px}
 #orb{width:100%;height:100%;display:block;cursor:pointer}
 .orb-pulse{
   position:absolute;inset:-8%;border-radius:50%;pointer-events:none;opacity:0;transition:opacity .5s;
@@ -122,43 +148,532 @@ button{cursor:pointer;border:none;background:none;color:inherit}
 .thinking .orb-pulse{opacity:1;animation:breathe 2.4s ease-in-out infinite}
 @keyframes breathe{0%,100%{transform:scale(1);opacity:.5}50%{transform:scale(1.06);opacity:1}}
 .status{
-  font-family:var(--serif);font-size:clamp(30px,5vw,46px);font-style:italic;
-  letter-spacing:.01em;margin-top:14px;min-height:1.2em;text-align:center;transition:color .4s;
+  font-family:var(--serif);font-size:clamp(22px,2.4vw,30px);font-style:italic;
+  letter-spacing:.01em;margin-top:10px;min-height:1.2em;text-align:center;transition:color .4s;
 }
 .subtatus{
-  font-size:13px;color:var(--muted);letter-spacing:.06em;
-  margin-top:4px;min-height:1.1em;text-align:center;
+  font-size:11px;color:var(--muted);letter-spacing:.06em;
+  margin-top:3px;min-height:1.1em;text-align:center;
 }
 
 /* ---------- audio visualizer ---------- */
-.viz{display:flex;align-items:flex-end;gap:4px;height:38px;margin-top:18px;opacity:0;transition:opacity .35s}
+.viz{display:flex;align-items:flex-end;gap:4px;height:30px;margin-top:12px;opacity:0;transition:opacity .35s}
 .viz.on{opacity:1}
 .viz .b{
-  width:4px;border-radius:3px;background:linear-gradient(var(--hi),var(--orange));
-  height:6px;transition:height .08s linear;
+  width:3px;border-radius:3px;background:linear-gradient(var(--hi),var(--orange));
+  height:5px;transition:height .08s linear;
 }
 
-/* ---------- conversation feed ---------- */
-.feed{
-  max-width:800px;margin:6px auto 0;padding:0 22px 200px;
-  display:flex;flex-direction:column;gap:16px;
+/* ---------- conversation board (primary content, top of page) ---------- */
+/* Premium glassmorphism panel — frosted dark surface with a hairline white
+   outline and a soft inner highlight. Visually contains the chat as its
+   own distinct workspace, separate from the orb on the right and the
+   diagnostics on the left. */
+.board{
+  position:relative;
+  margin:96px 420px 200px 240px;
+  border-radius:28px;
+  /* Soft layered glass: warm corner glow from the orb, cool deep gradient
+     on the body. No grids/patterns — kept clean like the reference. */
+  background:
+    radial-gradient(ellipse 70% 55% at 100% 0%, rgba(255,122,0,.06), transparent 60%),
+    radial-gradient(ellipse 60% 70% at 0% 100%, rgba(124,92,255,.05), transparent 60%),
+    linear-gradient(160deg, rgba(28,28,32,.62) 0%, rgba(14,14,18,.7) 100%);
+  -webkit-backdrop-filter:blur(28px) saturate(140%);
+  backdrop-filter:blur(28px) saturate(140%);
+  /* Hairline border + inner highlight = the signature glass edge */
+  border:1px solid rgba(255,255,255,.09);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.07),
+    inset 0 0 0 1px rgba(255,255,255,.015),
+    0 50px 100px -50px rgba(0,0,0,.95),
+    0 0 0 1px rgba(0,0,0,.4);
+  overflow:hidden;
 }
+/* Subtle top sheen — the light catching the edge of the glass */
+.board::before{
+  content:"";position:absolute;left:0;right:0;top:0;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.16),transparent);
+  pointer-events:none;z-index:3;
+}
+/* Soft bottom fade so messages dissolve into the surface */
+.board::after{
+  content:"";position:absolute;left:0;right:0;bottom:0;height:80px;
+  background:linear-gradient(0deg,rgba(10,10,14,.55),transparent);
+  pointer-events:none;z-index:1;
+}
+
+/* Board header — minimal, no skeuomorphic window chrome. Just a small label
+   with a live status indicator on the right (matches the reference's
+   stripped-back top bar). */
+.board-head{
+  position:relative;z-index:2;
+  display:flex;align-items:center;gap:14px;
+  padding:18px 26px 16px;
+  border-bottom:1px solid rgba(255,255,255,.06);
+}
+/* Repurposed: a slim accent bar instead of macOS dots */
+.board-dots{
+  flex:none;display:flex;align-items:center;gap:0;
+  width:3px;height:18px;border-radius:2px;
+  background:linear-gradient(180deg,var(--orange),var(--hi));
+  box-shadow:0 0 10px -1px var(--orange);
+}
+.board-dots i{display:none}
+.board-title{
+  font-size:13px;letter-spacing:.26em;text-transform:uppercase;
+  color:rgba(255,255,255,.78);font-weight:500;
+}
+.board-spark{
+  margin-left:auto;display:flex;align-items:center;gap:8px;flex:none;
+  font-size:10.5px;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--faint);
+}
+.board-spark::before{
+  content:"";width:7px;height:7px;border-radius:50%;
+  background:var(--orange);box-shadow:0 0 10px var(--orange);
+  animation:sparkBreathe 2.6s ease-in-out infinite;
+}
+.board-spark::after{
+  content:"LIVE";color:rgba(255,255,255,.62);
+}
+@keyframes sparkBreathe{
+  0%,100%{opacity:.5;transform:scale(.82)}
+  50%{opacity:1;transform:scale(1.08)}
+}
+
+/* Feed — inner scroll surface inside the glass panel */
+.feed{
+  position:relative;z-index:2;
+  max-width:none;
+  margin:0;
+  padding:28px 32px 44px;
+  display:flex;flex-direction:column;gap:18px;
+}
+
+/* ---------- empty state (animated centerpiece + starters) ---------- */
+/* Shown when the conversation feed has no children. Auto-hides via the
+   sibling selector below the moment JS appends the first message. */
+.board-empty{
+  position:relative;z-index:2;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:30px 32px 60px;min-height:340px;
+  text-align:center;
+  animation:rise .6s cubic-bezier(.22,1,.36,1) both;
+}
+.feed:not(:empty) ~ .board-empty{display:none}
+
+/* Aurora — soft floating gradient blobs behind the centerpiece */
+.empty-aurora{
+  position:absolute;inset:0;overflow:hidden;pointer-events:none;
+  border-radius:0 0 28px 28px;
+}
+.empty-aurora .blob{
+  position:absolute;width:300px;height:300px;border-radius:50%;
+  filter:blur(60px);opacity:.55;
+  animation:blobDrift 14s ease-in-out infinite;
+}
+.empty-aurora .blob-1{top:5%;left:18%;background:rgba(255,122,0,.28)}
+.empty-aurora .blob-2{top:30%;right:12%;background:rgba(255,179,71,.18);animation-delay:-5s}
+.empty-aurora .blob-3{bottom:-10%;left:42%;background:rgba(124,92,255,.18);animation-delay:-9s}
+@keyframes blobDrift{
+  0%,100%{transform:translate(0,0) scale(1)}
+  33%{transform:translate(40px,-30px) scale(1.12)}
+  66%{transform:translate(-30px,20px) scale(.94)}
+}
+
+/* Centerpiece — solid orange core with 3 expanding rings */
+.empty-core{
+  position:relative;width:130px;height:130px;margin-bottom:10px;
+}
+.empty-core .ring{
+  position:absolute;inset:0;border-radius:50%;
+  border:1.5px solid rgba(255,122,0,.7);
+  animation:ringExpand 3s cubic-bezier(.2,.7,.4,1) infinite;
+}
+.empty-core .ring-2{animation-delay:1s}
+.empty-core .ring-3{animation-delay:2s}
+@keyframes ringExpand{
+  0%{transform:scale(.25);opacity:0;border-color:rgba(255,122,0,1)}
+  20%{opacity:1}
+  100%{transform:scale(1.45);opacity:0;border-color:rgba(255,122,0,0)}
+}
+.empty-core .core{
+  position:absolute;top:50%;left:50%;
+  width:52px;height:52px;border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,var(--hi),var(--orange) 70%,#a04a00);
+  transform:translate(-50%,-50%);
+  box-shadow:
+    0 0 30px var(--orange),
+    0 0 70px rgba(255,122,0,.4),
+    inset 0 0 18px rgba(255,255,255,.15);
+  animation:corePulse 2.6s ease-in-out infinite;
+}
+@keyframes corePulse{
+  0%,100%{transform:translate(-50%,-50%) scale(1)}
+  50%{transform:translate(-50%,-50%) scale(1.08)}
+}
+
+/* Headline — italic serif with a gradient text fill */
+.empty-title{
+  font-family:var(--serif);
+  font-size:clamp(28px,3vw,38px);font-style:italic;font-weight:400;
+  background:linear-gradient(135deg,#fff,rgba(255,179,71,.7));
+  -webkit-background-clip:text;background-clip:text;
+  color:transparent;-webkit-text-fill-color:transparent;
+  margin:6px 0 0;letter-spacing:.005em;
+}
+.empty-sub{
+  font-size:12.5px;color:var(--muted);
+  letter-spacing:.16em;text-transform:uppercase;
+  margin:8px 0 22px;
+}
+
+/* ── Chief of Staff briefing card ─────────────────────────────────────── */
+/* Replaces the rings+greeting centerpiece when the /briefing API returns
+   actionable data (calendar/inbox/project/recent action). The card uses the
+   same glass aesthetic as the board itself so it reads as a native section
+   of the canvas rather than a popover. */
+.briefing{
+  position:relative;z-index:2;
+  width:min(560px,92%);
+  margin:6px 0 26px;
+  padding:24px 26px 22px;
+  border-radius:20px;
+  background:linear-gradient(160deg,rgba(255,255,255,.04),rgba(255,255,255,.02));
+  border:1px solid rgba(255,255,255,.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.05),
+    0 18px 40px -20px rgba(0,0,0,.55);
+  -webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);
+  text-align:left;
+}
+.brief-head{
+  display:flex;align-items:center;gap:10px;
+  font-size:11px;letter-spacing:.22em;text-transform:uppercase;
+  color:var(--faint);margin-bottom:4px;
+}
+.brief-time{color:rgba(255,255,255,.85);font-weight:600}
+.brief-date{color:var(--faint)}
+.brief-greet{
+  font-family:var(--serif);
+  font-size:clamp(26px,2.6vw,34px);font-style:italic;font-weight:400;
+  margin:0 0 16px;color:rgba(255,255,255,.92);
+  letter-spacing:.003em;
+}
+.brief-facts{
+  list-style:none;padding:0;margin:0;
+  display:flex;flex-direction:column;gap:10px;
+}
+.brief-fact{
+  display:flex;align-items:flex-start;gap:12px;
+  padding:11px 14px;border-radius:13px;
+  background:rgba(255,255,255,.03);
+  border:1px solid rgba(255,255,255,.06);
+}
+.brief-fact-i{
+  flex:none;width:26px;height:26px;border-radius:8px;
+  display:grid;place-items:center;
+  background:linear-gradient(135deg,var(--orange),var(--hi));
+  color:#0a0a0a;font-size:13px;font-weight:700;
+  box-shadow:0 0 12px -3px var(--orange);
+}
+/* Per-kind icon tinting — cal blue, mail red, project orange, action amber */
+.brief-fact--cal  .brief-fact-i{background:linear-gradient(135deg,#4285f4,#34a0e0);box-shadow:0 0 12px -3px #4285f4;color:#fff}
+.brief-fact--mail .brief-fact-i{background:linear-gradient(135deg,#ea4335,#fbbc04);box-shadow:0 0 12px -3px #ea4335;color:#fff}
+.brief-fact--proj .brief-fact-i{background:linear-gradient(135deg,var(--orange),var(--hi));color:#0a0a0a}
+.brief-fact--act  .brief-fact-i{background:linear-gradient(135deg,#a78bfa,#7c3aed);box-shadow:0 0 12px -3px #7c3aed;color:#fff}
+.brief-fact-body{
+  display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;
+}
+.brief-fact-primary{
+  font-size:14px;font-weight:600;color:var(--text);
+  overflow:hidden;text-overflow:ellipsis;
+}
+.brief-fact-secondary{
+  font-size:12px;color:var(--muted);
+  overflow:hidden;text-overflow:ellipsis;
+}
+.brief-refresh{
+  position:absolute;top:18px;right:18px;
+  display:flex;align-items:center;gap:6px;
+  padding:6px 11px;border-radius:100px;
+  background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);
+  font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted);cursor:pointer;transition:.18s;
+}
+.brief-refresh:hover{
+  color:var(--text);background:rgba(255,255,255,.09);border-color:rgba(255,255,255,.16);
+}
+.brief-refresh:disabled{opacity:.5;cursor:wait}
+.brief-refresh .icon{stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+/* ── Priorities section — Chief of Staff LLM synthesis ─────────────────── */
+/* Renders BELOW the facts list. The visual contract: facts are gray-toned,
+   priorities are orange-accented numbers in a sharper, more demanding style.
+   The user's eye should land on the priorities first when both are present. */
+.brief-priorities{
+  margin-top:20px;padding-top:18px;
+  border-top:1px solid rgba(255,255,255,.07);
+}
+.brief-priorities-head{
+  display:flex;align-items:baseline;gap:10px;margin-bottom:12px;
+}
+.brief-priorities-label{
+  font-size:11px;letter-spacing:.24em;text-transform:uppercase;
+  color:rgba(255,179,71,.9);font-weight:600;
+}
+.brief-priorities-sub{
+  font-size:10.5px;letter-spacing:.08em;color:var(--faint);
+}
+.brief-prio-list{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:11px;counter-reset:none}
+.brief-prio{
+  display:flex;align-items:flex-start;gap:14px;
+  padding:13px 15px;border-radius:13px;
+  background:linear-gradient(135deg,rgba(255,122,0,.07),rgba(255,179,71,.03));
+  border:1px solid rgba(255,122,0,.18);
+}
+.brief-prio-rank{
+  flex:none;
+  font-family:var(--serif);font-style:italic;
+  font-size:24px;font-weight:400;line-height:1;
+  width:28px;text-align:center;
+  background:linear-gradient(135deg,var(--orange),var(--hi));
+  -webkit-background-clip:text;background-clip:text;
+  color:transparent;-webkit-text-fill-color:transparent;
+}
+.brief-prio-body{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+.brief-prio-title{font-size:14px;font-weight:600;color:var(--text);line-height:1.35}
+.brief-prio-why{font-size:12px;color:var(--muted);line-height:1.4}
+.brief-prio-action{
+  font-size:12px;color:rgba(255,179,71,.85);font-weight:500;
+  margin-top:2px;
+}
+
+/* Loading state — three pulsing dots while the LLM synthesis is in flight */
+.brief-priorities-loading{
+  margin-top:16px;padding:14px 0;
+  display:flex;align-items:center;gap:8px;
+  font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);
+}
+.brief-priorities-loading .dot{
+  width:6px;height:6px;border-radius:50%;
+  background:var(--orange);opacity:.5;
+  animation:prioDot 1.2s ease-in-out infinite;
+}
+.brief-priorities-loading .dot:nth-child(2){animation-delay:.15s}
+.brief-priorities-loading .dot:nth-child(3){animation-delay:.3s}
+.brief-priorities-loading-text{margin-left:6px}
+@keyframes prioDot{
+  0%,100%{opacity:.3;transform:scale(.8)}
+  50%{opacity:1;transform:scale(1.15)}
+}
+
+/* Light-theme overrides — flip the same surface to the cream/white palette
+   we use elsewhere so the briefing card reads on both backgrounds. */
+html[data-theme="light"] .brief-priorities{
+  border-top-color:rgba(0,0,0,.07);
+}
+html[data-theme="light"] .brief-prio{
+  background:linear-gradient(135deg,rgba(255,122,0,.1),rgba(255,179,71,.04));
+  border-color:rgba(255,122,0,.28);
+}
+html[data-theme="light"] .brief-prio-title{color:#1a1410}
+html[data-theme="light"] .brief-prio-why{color:rgba(26,20,16,.62)}
+html[data-theme="light"] .brief-prio-action{color:rgba(160,75,0,.9)}
+html[data-theme="light"] .brief-priorities-label{color:rgba(160,75,0,.9)}
+
+html[data-theme="light"] .briefing{
+  background:linear-gradient(160deg,rgba(255,255,255,.7),rgba(247,243,236,.6));
+  border-color:rgba(0,0,0,.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.6),
+    0 18px 40px -20px rgba(0,0,0,.18);
+}
+html[data-theme="light"] .brief-fact{
+  background:rgba(255,255,255,.55);
+  border-color:rgba(0,0,0,.06);
+}
+html[data-theme="light"] .brief-greet{color:#1a1410}
+html[data-theme="light"] .brief-time{color:#1a1410}
+html[data-theme="light"] .brief-refresh{
+  background:rgba(0,0,0,.04);border-color:rgba(0,0,0,.08);color:rgba(26,20,16,.6);
+}
+html[data-theme="light"] .brief-refresh:hover{
+  color:#1a1410;background:rgba(0,0,0,.07);
+}
+
+/* Starter chips — glassy pills with a gradient icon badge */
+.empty-chips{
+  display:flex;flex-wrap:wrap;justify-content:center;gap:10px;
+  max-width:560px;
+}
+.qchip{
+  display:flex;align-items:center;gap:10px;
+  padding:11px 18px 11px 12px;border-radius:100px;
+  background:rgba(255,255,255,.04);
+  border:1px solid rgba(255,255,255,.09);
+  color:var(--text);font-size:13px;font-weight:500;
+  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
+  cursor:pointer;transition:transform .2s,background .2s,border-color .2s;
+}
+.qchip:hover{
+  background:rgba(255,122,0,.12);
+  border-color:rgba(255,122,0,.4);
+  transform:translateY(-2px);
+}
+.qchip-i{
+  display:inline-grid;place-items:center;flex:none;
+  width:24px;height:24px;border-radius:7px;
+  background:linear-gradient(135deg,var(--orange),var(--hi));
+  color:#0a0a0a;font-size:12px;font-weight:700;
+  box-shadow:0 0 10px -2px var(--orange);
+}
+
+/* ---------- light-theme overrides ---------- */
+/* The board, cards, and empty state all have hand-tuned dark gradients that
+   ignore CSS variables (they need specific stops for the glass look). In
+   light mode those dark gradients stay dark while the text inside flips to
+   dark via var(--text) — unreadable. Below: parallel light-mode gradients
+   that keep the same glass aesthetic in white/cream. */
+
+html[data-theme="light"] .board{
+  background:
+    radial-gradient(ellipse 70% 55% at 100% 0%, rgba(255,122,0,.07), transparent 60%),
+    radial-gradient(ellipse 60% 70% at 0% 100%, rgba(124,92,255,.04), transparent 60%),
+    linear-gradient(160deg, rgba(255,255,255,.78) 0%, rgba(247,243,236,.86) 100%);
+  border-color:rgba(0,0,0,.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.55),
+    inset 0 0 0 1px rgba(255,255,255,.3),
+    0 50px 100px -50px rgba(0,0,0,.22),
+    0 0 0 1px rgba(0,0,0,.04);
+}
+html[data-theme="light"] .board::before{
+  background:linear-gradient(90deg,transparent,rgba(0,0,0,.07),transparent);
+}
+html[data-theme="light"] .board::after{
+  background:linear-gradient(0deg,rgba(247,243,236,.7),transparent);
+}
+html[data-theme="light"] .board-head{
+  border-bottom-color:rgba(0,0,0,.07);
+}
+html[data-theme="light"] .board-title{color:rgba(26,20,16,.78)}
+html[data-theme="light"] .board-spark::after{color:rgba(26,20,16,.62)}
+
+/* HUNT bubble — white frosted glass with subtle warm wash */
+html[data-theme="light"] .card.hunt{
+  background:linear-gradient(135deg,rgba(255,255,255,.85),rgba(250,246,240,.78));
+  border-color:rgba(0,0,0,.08);
+  box-shadow:
+    0 14px 38px -18px rgba(0,0,0,.2),
+    0 0 0 1px rgba(255,255,255,.4) inset;
+}
+html[data-theme="light"] .card.hunt .who{color:rgba(26,20,16,.6)}
+
+/* USER bubble — soft warm cream with stronger orange hint */
+html[data-theme="light"] .card.user{
+  background:linear-gradient(135deg,rgba(255,179,71,.22),rgba(255,122,0,.09));
+  border-color:rgba(255,122,0,.35);
+  box-shadow:
+    0 10px 28px -10px rgba(255,122,0,.18),
+    0 0 0 1px rgba(255,255,255,.3) inset;
+}
+html[data-theme="light"] .card.user .who{color:rgba(160,75,0,.85)}
+
+/* Inline + block code — flip dark-on-dark to dark-on-light */
+html[data-theme="light"] .card .text code{
+  background:rgba(0,0,0,.06);color:#1a1410;
+}
+html[data-theme="light"] .card .text pre{
+  background:rgba(0,0,0,.05);color:#1a1410;
+  border:1px solid rgba(0,0,0,.06);
+}
+
+/* Empty-state title — gradient swaps from white→amber to dark→amber */
+html[data-theme="light"] .empty-title{
+  background:linear-gradient(135deg,#1a1410 0%,rgba(180,80,0,.85) 100%);
+  -webkit-background-clip:text;background-clip:text;
+}
+
+/* Starter chips — translucent white pills */
+html[data-theme="light"] .qchip{
+  background:rgba(255,255,255,.65);
+  border-color:rgba(0,0,0,.1);
+  color:#1a1410;
+}
+html[data-theme="light"] .qchip:hover{
+  background:rgba(255,122,0,.14);
+  border-color:rgba(255,122,0,.45);
+}
+
+/* Aurora blobs — slightly stronger in light mode so they're still visible
+   against the cream background (the dark-mode opacity is too faint on white) */
+html[data-theme="light"] .empty-aurora .blob-1{background:rgba(255,122,0,.22)}
+html[data-theme="light"] .empty-aurora .blob-2{background:rgba(255,179,71,.16)}
+html[data-theme="light"] .empty-aurora .blob-3{background:rgba(124,92,255,.14)}
+/* Base card — shared rhythm; per-role styling below overrides shape + color. */
 .card{
-  padding:16px 20px;border-radius:18px;background:var(--panel);
-  border:1px solid var(--border);backdrop-filter:blur(16px);
-  box-shadow:var(--shadow);max-width:86%;
+  position:relative;
+  padding:16px 20px;border-radius:18px;
+  -webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);
   animation:rise .5s cubic-bezier(.22,1,.36,1) both;
 }
 @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
 .card .who{
-  display:flex;align-items:center;gap:8px;
-  font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);
-  margin-bottom:7px;
+  display:flex;align-items:center;gap:9px;
+  font-size:10.5px;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:8px;
 }
-.card .who i{width:7px;height:7px;border-radius:50%}
-.card.user{align-self:flex-end;border-color:rgba(255,122,0,.25)}
-.card.user .who i{background:var(--hi)}
-.card.hunt .who i{background:var(--orange);box-shadow:0 0 8px var(--orange)}
+.card .who i{width:6px;height:6px;border-radius:50%;flex:none}
+
+/* ── HUNT bubble ─────────────────────────────────────────────────────────
+   Left-aligned. Speech-bubble shape (tail points to the lower-left toward
+   the orb on the right side via reading flow). Subtle gradient body so it
+   reads as the system speaker. A small "H" avatar replaces the orange dot
+   in the header for stronger identity. */
+.card.hunt{
+  align-self:flex-start;
+  max-width:88%;
+  background:linear-gradient(135deg,rgba(28,28,28,.78),rgba(18,18,18,.72));
+  border:1px solid rgba(255,255,255,.08);
+  border-radius:20px 20px 20px 6px;
+  box-shadow:
+    0 14px 38px -18px rgba(0,0,0,.7),
+    0 0 0 1px rgba(255,122,0,.03) inset;
+}
+.card.hunt .who{color:rgba(255,255,255,.62)}
+.card.hunt .who i{display:none}
+.card.hunt .who::before{
+  content:"H";
+  width:22px;height:22px;border-radius:7px;
+  display:grid;place-items:center;
+  font-family:var(--sans);font-weight:700;font-size:11px;letter-spacing:0;
+  color:#0a0a0a;
+  background:linear-gradient(135deg,var(--orange),var(--hi));
+  box-shadow:0 0 14px -2px var(--orange);
+  flex:none;
+}
+
+/* ── USER bubble ─────────────────────────────────────────────────────────
+   Right-aligned. Warmer, orange-tinted glass with the corner tail pointing
+   the other way. Narrower max-width so short messages stay tight. */
+.card.user{
+  align-self:flex-end;
+  max-width:70%;
+  background:linear-gradient(135deg,rgba(255,122,0,.16),rgba(255,179,71,.07));
+  border:1px solid rgba(255,122,0,.3);
+  border-radius:20px 20px 6px 20px;
+  box-shadow:
+    0 10px 28px -10px rgba(255,122,0,.22),
+    0 0 0 1px rgba(255,122,0,.04) inset;
+}
+.card.user .who{color:rgba(255,179,71,.85)}
+.card.user .who i{
+  background:var(--hi);
+  box-shadow:0 0 8px var(--hi);
+}
+
 .card .text{font-size:15px;line-height:1.6;word-wrap:break-word}
 .card .text strong{font-weight:700;color:var(--text)}
 .card .text em{font-style:italic;color:var(--muted)}
@@ -376,10 +891,26 @@ button{cursor:pointer;border:none;background:none;color:inherit}
 .toast.ok{border-color:color-mix(in srgb,var(--orange) 50%,var(--border))}
 
 /* ---------- responsive ---------- */
+/* Intermediate viewports — left diag cards squeeze the feed, drop them. */
+@media(max-width:1200px){
+  .diag{display:none}
+  .feed{margin-left:28px}
+}
+/* Narrow / tablet — orb can't fit a 360px sidecar, collapse the side dock
+   back into normal flow at the top of the page. */
+@media(max-width:900px){
+  .stage{
+    position:static;width:auto;
+    padding:96px 16px 8px;
+  }
+  .orb-box{width:min(60vw,260px);height:min(60vw,260px);margin:0 auto}
+  .feed{margin:8px 16px 200px}
+  .timeline{display:none}
+}
 @media(max-width:760px){
-  .diag,.timeline{display:none}
-  .stage{padding:90px 16px 20px}
-  .feed{padding:0 16px 200px}
+  .orb-box{width:min(70vw,220px);height:min(70vw,220px)}
+  .status{font-size:clamp(20px,4vw,26px)}
+  .feed{margin:8px 12px 200px}
 }
 
 /* ---------- topbar action cluster ---------- */
@@ -518,6 +1049,64 @@ button{cursor:pointer;border:none;background:none;color:inherit}
 .cite-row .cite-kind--document{background:color-mix(in srgb, var(--bg2) 60%, #6aa3ff 18%);color:#6aa3ff}
 .cite-row .cite-kind--project{background:color-mix(in srgb, var(--bg2) 60%, #5fd6a8 18%);color:#5fd6a8}
 .cite-row .cite-kind--gmail{background:color-mix(in srgb, var(--bg2) 60%, #ea4335 22%);color:#ea4335}
+.cite-row .cite-kind--calendar{background:color-mix(in srgb, var(--bg2) 60%, #4285f4 22%);color:#4285f4}
+
+/* ---------- toggle row (Settings → Wake word) ---------- */
+.toggle-row{
+  display:flex;align-items:center;gap:14px;cursor:pointer;
+  padding:12px 14px;border-radius:12px;
+  background:var(--bg2);border:1px solid var(--border);
+  transition:border-color .2s;
+}
+.toggle-row:hover{border-color:var(--border2)}
+.toggle-l{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.toggle-name{font-size:13px;font-weight:600;color:var(--text)}
+.toggle-sub{font-size:11px;color:var(--muted);letter-spacing:.04em}
+.toggle-row input[type="checkbox"]{
+  position:absolute;opacity:0;pointer-events:none;
+}
+.toggle-sw{
+  position:relative;flex:none;
+  width:38px;height:22px;border-radius:100px;
+  background:rgba(255,255,255,.12);border:1px solid var(--border);
+  transition:background .25s,border-color .25s;
+}
+.toggle-sw::after{
+  content:"";position:absolute;top:2px;left:2px;
+  width:16px;height:16px;border-radius:50%;
+  background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.5);
+  transition:transform .25s,background .25s;
+}
+.toggle-row input:checked ~ .toggle-sw{
+  background:linear-gradient(135deg,var(--orange),var(--hi));
+  border-color:transparent;
+}
+.toggle-row input:checked ~ .toggle-sw::after{
+  transform:translateX(16px);background:#0a0a0a;
+}
+
+/* ---------- wake-word visual cue ---------- */
+/* When the wake word fires, a brief ring expands from the orb container
+   and a soft orange wash floods the stage so the user sees Hunt 'heard'
+   them — happens BEFORE the listening orb animation kicks in. */
+.stage.wake-flash::before{
+  content:"";position:absolute;
+  top:50%;left:50%;width:200px;height:200px;
+  border-radius:50%;
+  border:2px solid var(--orange);
+  transform:translate(-50%,-50%) scale(.5);
+  opacity:0;pointer-events:none;
+  animation:wakeFlash 1.5s ease-out 1;
+  z-index:14;
+}
+@keyframes wakeFlash{
+  0%{opacity:.9;transform:translate(-50%,-50%) scale(.4);
+     box-shadow:0 0 0 0 rgba(255,122,0,.6),inset 0 0 24px rgba(255,122,0,.5)}
+  60%{opacity:.4;transform:translate(-50%,-50%) scale(1.6);
+      box-shadow:0 0 30px 5px rgba(255,122,0,.2),inset 0 0 12px rgba(255,122,0,.1)}
+  100%{opacity:0;transform:translate(-50%,-50%) scale(2.2);
+       box-shadow:none}
+}
 .cite-row .cite-kind--task{background:color-mix(in srgb, var(--bg2) 60%, #d68b5f 18%);color:#d68b5f}
 .cite-row .cite-title{flex:1;color:var(--text);font-weight:600;font-size:12.5px}
 .cite-row .cite-stamp{font-size:10.5px;color:var(--faint)}
@@ -544,6 +1133,10 @@ button{cursor:pointer;border:none;background:none;color:inherit}
   display:grid;place-items:center;flex:none;
   background:linear-gradient(135deg,#ea4335,#fbbc04);
   color:#fff;font-weight:800;font-size:18px;letter-spacing:.02em;
+}
+/* Calendar icon — Google Calendar blue gradient (matches their brand) */
+.integ-icon.integ-icon--cal{
+  background:linear-gradient(135deg,#4285f4,#34a0e0);
 }
 .integ-body{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
 .integ-name{color:var(--text);font-weight:700;font-size:14px}

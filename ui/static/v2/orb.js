@@ -91,13 +91,19 @@
         });
       }
 
-      // Satellites — 6 orbiters
+      // Satellites — 6 orbiters.
+      // Orbit radius is in units of `this.R` (the orb's core radius). Core R is
+      // 0.30 × min(W,H), so a satellite at side-on (z≈0, sc≈1) draws at
+      // R × rad pixels from center. The canvas edge is at 0.50 × min(W,H), so
+      // any `rad > 1.667` clips the side-on satellites. Old values were
+      // 1.55–1.85 → 5.5% overshoot on the right edge (the clipping the user
+      // reported). New range 1.30–1.50 → ~10% buffer, safe at all angles.
       this.sats = [];
       for (let s = 0; s < 6; s++) {
         this.sats.push({
           ang: (s / 6) * TWO_PI,
           tilt: (Math.random() - 0.5) * 1.2,
-          rad: 1.55 + Math.random() * 0.3,
+          rad: 1.30 + Math.random() * 0.20,
           sp: 0.003 + Math.random() * 0.004,
           spin: Math.random() * 6,
         });

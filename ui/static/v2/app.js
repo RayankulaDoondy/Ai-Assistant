@@ -154,7 +154,10 @@
 
     // Pull fenced code blocks OUT first as opaque placeholders so the
     // line-by-line block processor below doesn't eat their newlines / fold
-    // them into a paragraph. We restore them at the end.
+    // them into a paragraph. We restore them at the end. The marker uses
+    // double-brackets so it survives line.trim() and end-of-paragraph
+    // positions (an older space-padded marker like " CODE0 " disappeared
+    // whenever the line got trimmed, leaving "CODE0" as visible text).
     const codeBlocks = [];
     src = src.replace(/```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```/g, (_, lang, body) => {
       const cls = lang ? ` class="lang-${lang.toLowerCase()}"` : "";
@@ -162,7 +165,7 @@
       // still render, while keeping internal indentation intact.
       const cleaned = body.replace(/^\n/, "").replace(/\n$/, "");
       codeBlocks.push(`<pre><code${cls}>${cleaned}</code></pre>`);
-      return ` CODE${codeBlocks.length - 1} `;
+      return `\n[[HUNTCODE${codeBlocks.length - 1}]]\n`;
     });
 
     src = src.replace(/`([^`\n]+)`/g, "<code>$1</code>");
@@ -177,7 +180,7 @@
       const ln = raw.trim();
       if (!ln) { flushP(); flushL(); continue; }
       // A code-block placeholder is its own paragraph — flush surrounding state.
-      const cb = ln.match(/^ CODE(\d+) $/);
+      const cb = ln.match(/^\[\[HUNTCODE(\d+)\]\]$/);
       if (cb) {
         flushP(); flushL();
         out.push(codeBlocks[+cb[1]] || "");
@@ -201,7 +204,8 @@
     let html = out.join("");
     // Restore code blocks that ended up inside a <p> because they were on
     // the same line as surrounding prose (rare, but possible during streaming).
-    html = html.replace(/ CODE(\d+) /g, (_, i) => codeBlocks[+i] || "");
+    // No whitespace required around the marker — survives end-of-paragraph.
+    html = html.replace(/\[\[HUNTCODE(\d+)\]\]/g, (_, i) => codeBlocks[+i] || "");
     return html;
   }
   function makeCard(who, html) {
@@ -470,10 +474,17 @@
             // sees that Hunt is researching, not just thinking.
             showToolStatus(aiText, ev.label || `Running ${ev.name || "tool"}…`);
           } else if (ev.type === "tool_result") {
-            // The tool returned; update the status row to reflect the count
-            // so the user knows how much material the answer is grounded in.
+            // The tool returned; update the status row to reflect the source
+            // and the count so the user knows how much material the answer
+            // is grounded in.
             const n = (ev.count == null) ? "" : ` · ${ev.count} hit${ev.count === 1 ? "" : "s"}`;
-            updateToolStatus(aiText, `Pulled from memory${n}`);
+            const source =
+              ev.name === "gmail_search" ? "Pulled from Gmail" :
+              ev.name === "gmail_read" ? "Read Gmail message" :
+              ev.name === "calendar_search" ? "Pulled from Calendar" :
+              ev.name === "retrieve_memory" ? "Pulled from memory" :
+              `Pulled from ${ev.name || "tool"}`;
+            updateToolStatus(aiText, `${source}${n}`);
           } else if (ev.type === "voice") {
             // Server-extracted one-sentence summary intended for TTS only.
             // We stash it; the actual TTS fires on `done` so it speaks AFTER
@@ -756,6 +767,63 @@
     if (orb) orb.detachStream();
     if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
   }
+
+  // ---- Wake-word ("Hey Jarvis") subscription ----
+  // The desktop helper detects the wake word locally and POSTs Hunt; Hunt
+  // re-emits via SSE on /voice/wakeword/stream. On each "wake" event we
+  // trigger the same mic flow the orb-tap does (fab.click()), plus a visual
+  // pulse so the user gets feedback that Hunt actually heard them.
+  // User preference: localStorage `huntWakeEnabled` — defaults to "1" (on).
+  // Toggle is in the settings drawer; when off, we still subscribe but
+  // ignore wake events (cheaper than tearing down + recreating the stream).
+  (function setupWakeWordStream() {
+    let es = null;
+    let reconnectTimer = null;
+    function isEnabled() {
+      return (localStorage.getItem("huntWakeEnabled") || "1") !== "0";
+    }
+    function flashWakePulse() {
+      const stage = document.querySelector(".stage");
+      if (!stage) return;
+      stage.classList.add("wake-flash");
+      setTimeout(() => stage.classList.remove("wake-flash"), 1500);
+    }
+    function onWake(detail) {
+      if (!isEnabled()) {
+        console.log("[wake] received but disabled in settings:", detail);
+        return;
+      }
+      if (busy || recording) {
+        console.log("[wake] ignored — Hunt is already busy/recording");
+        return;
+      }
+      console.log("[wake] firing mic flow:", detail);
+      flashWakePulse();
+      // Tiny delay so the pulse is visible before the orb goes into
+      // 'listening' state (which has its own animations).
+      setTimeout(() => { try { fab.click(); } catch (e) { console.error(e); } }, 120);
+    }
+    function connect() {
+      try {
+        es = new EventSource("/voice/wakeword/stream");
+        es.addEventListener("connected", () => console.log("[wake] SSE connected"));
+        es.addEventListener("wake", (ev) => {
+          let detail = {};
+          try { detail = JSON.parse(ev.data || "{}"); } catch (_) {}
+          onWake(detail);
+        });
+        es.onerror = () => {
+          console.warn("[wake] SSE dropped, reconnecting in 5s");
+          if (es) { es.close(); es = null; }
+          clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(connect, 5000);
+        };
+      } catch (e) {
+        console.error("[wake] EventSource init failed:", e);
+      }
+    }
+    connect();
+  })();
 
   fab.onclick = async () => {
     if (busy) return;
@@ -1151,9 +1219,104 @@
     await refreshGmailStatus();
   };
 
-  // Decorate the gear click so opening the drawer also re-fetches the
-  // Gmail status. Avoids reassigning the openDrawer function declaration.
-  $("#gear").onclick = () => { openDrawer(true); refreshGmailStatus(); };
+  // ---- Wake-word toggle ----
+  // Persists to localStorage. The wake SSE setup function above reads
+  // the same key on every incoming event, so flipping the toggle takes
+  // effect immediately without restarting anything.
+  const wakeEl = $("#wakeEnabled");
+  const wakeSub = $("#wakeSub");
+  if (wakeEl) {
+    wakeEl.checked = (localStorage.getItem("huntWakeEnabled") || "1") !== "0";
+    wakeEl.onchange = () => {
+      localStorage.setItem("huntWakeEnabled", wakeEl.checked ? "1" : "0");
+      if (wakeSub) wakeSub.textContent = wakeEl.checked
+        ? "On — Hunt is listening for the wake word."
+        : "Off — tap the mic or type instead.";
+    };
+    // Initial sub text — kicked again when the drawer opens via openDrawer.
+    wakeSub.textContent = wakeEl.checked
+      ? "On — Hunt is listening for the wake word."
+      : "Off — tap the mic or type instead.";
+  }
+
+  // ---- Calendar integration ----
+  // Same shape as Gmail above, pointed at the calendar-specific endpoints.
+  async function refreshCalStatus() {
+    const statusEl = $("#calStatus");
+    const hintEl = $("#calHint");
+    const connectBtn = $("#calConnect");
+    const disconnectBtn = $("#calDisconnect");
+    const setupHint = $("#calSetupHint");
+    if (!statusEl) return;
+    try {
+      const res = await fetch("/auth/google-calendar/status");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const s = await res.json();
+      if (!s.client_configured) {
+        statusEl.textContent = "Setup required";
+        statusEl.className = "integ-status integ-status--warn";
+        hintEl.textContent = "One-time Google Cloud Console setup is needed before you can connect.";
+        connectBtn.disabled = true;
+        connectBtn.textContent = "Connect Calendar";
+        connectBtn.hidden = false;
+        disconnectBtn.hidden = true;
+        setupHint.hidden = false;
+        return;
+      }
+      setupHint.hidden = true;
+      if (s.connected) {
+        statusEl.textContent = "Connected" + (s.email ? " as " + s.email : "");
+        statusEl.className = "integ-status integ-status--ok";
+        hintEl.textContent = "Hunt can read this Google Calendar during Research Mode chats.";
+        connectBtn.hidden = true;
+        disconnectBtn.hidden = false;
+        disconnectBtn.disabled = false;
+      } else {
+        statusEl.textContent = "Not connected";
+        statusEl.className = "integ-status integ-status--idle";
+        hintEl.textContent = "Click Connect Calendar, sign in, and approve read-only access.";
+        connectBtn.disabled = false;
+        connectBtn.textContent = "Connect Calendar";
+        connectBtn.hidden = false;
+        disconnectBtn.hidden = true;
+      }
+    } catch (e) {
+      statusEl.textContent = "Status unavailable";
+      statusEl.className = "integ-status integ-status--warn";
+      hintEl.textContent = "Couldn't reach Hunt: " + (e.message || e);
+      connectBtn.disabled = true;
+    }
+  }
+
+  $("#calConnect").onclick = () => {
+    window.open("/auth/google-calendar/start", "_blank", "noopener");
+    let polls = 0;
+    const t = setInterval(async () => {
+      polls++;
+      await refreshCalStatus();
+      const stat = $("#calStatus")?.textContent || "";
+      if (stat.startsWith("Connected") || polls >= 60) clearInterval(t);
+    }, 3000);
+  };
+
+  $("#calDisconnect").onclick = async () => {
+    if (!confirm("Disconnect Google Calendar? Hunt will lose access; Google revokes the token on their side too.")) return;
+    const btn = $("#calDisconnect");
+    btn.disabled = true;
+    btn.textContent = "Disconnecting…";
+    try {
+      await fetch("/auth/google-calendar/revoke", { method: "POST" });
+      toast("Calendar disconnected");
+    } catch (e) {
+      toast("Disconnect failed: " + (e.message || e), "err");
+    }
+    btn.textContent = "Disconnect";
+    await refreshCalStatus();
+  };
+
+  // Decorate the gear click so opening the drawer also re-fetches BOTH
+  // integration statuses. Avoids reassigning the openDrawer function declaration.
+  $("#gear").onclick = () => { openDrawer(true); refreshGmailStatus(); refreshCalStatus(); };
 
   // ---- Speech rate ----
   const rateEl = $("#speechRate");
